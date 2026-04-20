@@ -62,7 +62,7 @@ After=network.target mistserver.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/ffmpeg -i ${MIST_HLS_URL} -c copy -f hls -hls_time 2 -hls_list_size 5 -hls_flags delete_segments+append_list+split_by_time -hls_segment_filename ${HLS_DIR}/seg_%%05d.ts ${HLS_DIR}/index.m3u8
+ExecStart=/usr/bin/ffmpeg -i ${MIST_HLS_URL} -c copy -f hls -hls_time 2 -hls_list_size 10 -hls_flags append_list+split_by_time -hls_segment_filename ${HLS_DIR}/seg_%%05d.ts ${HLS_DIR}/index.m3u8
 Restart=always
 RestartSec=5
 
@@ -82,7 +82,7 @@ After=network.target ${FFMPEG_UNIT}.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/rclone sync ${HLS_DIR} r2:${R2_BUCKET}/live/${STREAM_NAME} --s3-chunk-size=5M --transfers=8 --fast-list --log-level=ERROR
+ExecStart=/usr/bin/rclone copy ${HLS_DIR} r2:${R2_BUCKET}/live/${STREAM_NAME} --s3-chunk-size=5M --transfers=8 --log-level=ERROR
 Restart=always
 RestartSec=2
 
