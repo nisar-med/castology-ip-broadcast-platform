@@ -24,21 +24,43 @@ else
   echo "==> MistServer already installed — skipping"
 fi
 
-# Set Prometheus passphrase in config
+# Configure MistServer — must be done with service stopped to prevent overwrites
+systemctl stop mistserver 2>/dev/null || true
+sleep 2
+
 if [ -f /etc/mistserver.conf ]; then
   python3 - <<PYEOF
 import json
+
 with open('/etc/mistserver.conf') as f:
     cfg = json.load(f)
+
 cfg.setdefault('config', {})['prometheus'] = '${PROMETHEUS_PASSPHRASE}'
+
+# Protocols: HTTP on 8080, HLS output, SRT ingest on configured port
+cfg['config']['protocols'] = [
+    {"connector": "HTTP",  "online": 1, "port": 8080},
+    {"connector": "HLS",   "online": 1},
+    {"connector": "TSSRT", "online": 1, "port": ${SRT_INGEST_PORT}},
+]
+
+# Wildcard stream — accepts any push with geo+ prefix
+cfg.setdefault('streams', {})['geo'] = {
+    "name": "geo",
+    "source": "push://",
+    "processes": [],
+    "stop_sessions": False,
+    "tags": []
+}
+
 with open('/etc/mistserver.conf', 'w') as f:
     json.dump(cfg, f, indent=2)
-print('MistServer Prometheus passphrase configured')
+print('MistServer config written')
 PYEOF
 fi
 
 systemctl enable mistserver
-systemctl restart mistserver
+systemctl start mistserver
 echo "==> MistServer running"
 
 echo "==> Streaming server setup complete"
