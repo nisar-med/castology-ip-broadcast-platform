@@ -124,3 +124,68 @@ module "dns" {
   srt_ingest_port  = var.srt_ingest_port
   srt_output_ports = var.srt_output_ports
 }
+
+# ---------------------------------------------------------------------------
+# R2 bucket — HLS segment storage
+# ---------------------------------------------------------------------------
+module "r2" {
+  source = "./modules/r2"
+
+  account_id  = var.cloudflare_account_id
+  bucket_name = var.r2_bucket_name
+}
+
+# ---------------------------------------------------------------------------
+# Cloudflare Worker — HLS delivery via play.castology.tv
+# ---------------------------------------------------------------------------
+module "worker" {
+  source = "./modules/worker"
+
+  account_id     = var.cloudflare_account_id
+  r2_bucket_name = module.r2.bucket_name
+
+  depends_on = [module.r2]
+}
+
+# ---------------------------------------------------------------------------
+# MistServer R2 push config — runs after R2 credentials are available
+# ---------------------------------------------------------------------------
+resource "null_resource" "mistserver_r2_push" {
+  triggers = {
+    script       = filemd5("${path.module}/scripts/mistserver-r2-push.sh")
+    r2_endpoint  = module.r2.s3_endpoint
+    bucket_name  = module.r2.bucket_name
+    stream_names = join(",", var.stream_names)
+    access_key   = var.r2_access_key_id
+  }
+
+  connection {
+    type        = "ssh"
+    host        = var.vps[var.mistserver_vps].ip
+    user        = "root"
+    private_key = file(var.ssh_private_key_path)
+    timeout     = "10m"
+  }
+
+  provisioner "file" {
+    source      = "${path.module}/scripts/mistserver-r2-push.sh"
+    destination = "/tmp/mistserver-r2-push.sh"
+  }
+
+  provisioner "remote-exec" {
+    inline = concat(
+      ["chmod +x /tmp/mistserver-r2-push.sh"],
+      [for stream in var.stream_names : join(" ", [
+        "MIST_API_PORT=${var.mist_api_port}",
+        "R2_ENDPOINT=${module.r2.s3_endpoint}",
+        "R2_ACCESS_KEY=${var.r2_access_key_id}",
+        "R2_SECRET_KEY=${var.r2_secret_access_key}",
+        "R2_BUCKET=${module.r2.bucket_name}",
+        "STREAM_NAME=${stream}",
+        "/tmp/mistserver-r2-push.sh",
+      ])]
+    )
+  }
+
+  depends_on = [module.mistserver, module.r2]
+}

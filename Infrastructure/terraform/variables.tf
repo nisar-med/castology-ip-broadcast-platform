@@ -7,6 +7,38 @@ variable "cloudflare_api_token" {
   sensitive   = true
 }
 
+variable "cloudflare_account_id" {
+  description = "Cloudflare account ID (from dashboard URL or account overview)"
+  type        = string
+}
+
+# ---------------------------------------------------------------------------
+# R2 / HLS streaming
+# ---------------------------------------------------------------------------
+variable "r2_bucket_name" {
+  description = "R2 bucket name for HLS segments"
+  type        = string
+  default     = "castology-hls"
+}
+
+variable "r2_access_key_id" {
+  description = "R2 API token ID (create in Cloudflare dashboard: R2 → Manage API tokens)"
+  type        = string
+  sensitive   = true
+}
+
+variable "r2_secret_access_key" {
+  description = "R2 API token secret (create in Cloudflare dashboard: R2 → Manage API tokens)"
+  type        = string
+  sensitive   = true
+}
+
+variable "stream_names" {
+  description = "MistServer stream names to configure R2 push for"
+  type        = list(string)
+  default     = ["geo-news", "geo-ent"]
+}
+
 # ---------------------------------------------------------------------------
 # SSH
 # ---------------------------------------------------------------------------
