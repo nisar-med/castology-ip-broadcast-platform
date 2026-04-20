@@ -11,5 +11,4 @@
 resource "cloudflare_r2_bucket" "hls" {
   account_id = var.account_id
   name       = var.bucket_name
-  location   = "WEUR"
 }
