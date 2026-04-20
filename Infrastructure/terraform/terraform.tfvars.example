@@ -1,0 +1,109 @@
+# Copy to terraform.tfvars and fill in real values.
+# NEVER commit terraform.tfvars to version control.
+#
+# Apply everything:    terraform apply
+# Apply one module:    terraform apply -target=module.mistserver
+
+# ---------------------------------------------------------------------------
+# OVH API credentials
+# ---------------------------------------------------------------------------
+ovh_application_key    = "YOUR_APP_KEY"
+ovh_application_secret = "YOUR_APP_SECRET"
+ovh_consumer_key       = "YOUR_CONSUMER_KEY"
+
+# ---------------------------------------------------------------------------
+# Cloudflare
+# ---------------------------------------------------------------------------
+cloudflare_api_token = "REPLACE_WITH_CLOUDFLARE_API_TOKEN"
+
+ssh_private_key_path = "~/.ssh/id_rsa"
+
+# ---------------------------------------------------------------------------
+# Which vps key runs each service (matches keys in var.vps below)
+# ---------------------------------------------------------------------------
+mistserver_vps = "streaming"
+monitoring_vps = "monitoring"
+
+# ---------------------------------------------------------------------------
+# Ports
+# ---------------------------------------------------------------------------
+mist_api_port = 4242
+exporter_port = 9101
+grafana_port  = 3000
+
+# ---------------------------------------------------------------------------
+# Secrets
+# ---------------------------------------------------------------------------
+prometheus_passphrase     = "REPLACE_WITH_RANDOM_HEX_16"
+grafana_admin_password    = "REPLACE_WITH_STRONG_PASSWORD"
+pocketbase_admin_email    = "admin@castology.tv"
+pocketbase_admin_password = "REPLACE_WITH_STRONG_PASSWORD"
+
+# ---------------------------------------------------------------------------
+# VPS definitions
+#
+# Keys are labels — use any name you like.
+# Same IP on multiple entries = single VPS; nginx sites and firewall ports
+# are automatically merged, no duplicate resources created.
+#
+# nginx_sites: any subset of "play", "mist", "monitoring", "onboard"
+#
+# Firewall port guide (static infrastructure ports only):
+#   22    TCP  open to all (SSH)
+#   80    TCP  open to all (nginx — Cloudflare proxies HTTPS)
+#   4242  TCP  restricted to monitoring IP (MistServer API)
+#   9101  TCP  restricted to monitoring IP (TSduck exporter)
+#   3000  TCP  restricted to platform admin IP (Grafana)
+#
+# SRT broadcaster ports are managed via OVH control panel (not Terraform),
+# as they change when broadcasters onboard/offboard.
+# ---------------------------------------------------------------------------
+
+# ── Single VPS ──────────────────────────────────────────────────────────────
+vps = {
+  streaming = {
+    ip          = "1.2.3.4"
+    nginx_sites = ["play", "mist", "monitoring", "onboard"]
+    firewall = {
+      allow_tcp = [22, 80]
+      allow_tcp_from = {
+        "4242" = ["1.2.3.4/32"]              # MistServer API — localhost (same VPS)
+        "9101" = ["1.2.3.4/32"]              # TSduck exporter — localhost
+        "3000" = ["YOUR_ADMIN_IP/32"]        # Grafana — platform admin only
+      }
+    }
+  }
+  monitoring = {
+    ip          = "1.2.3.4"                  # same IP — no extra resources created
+    nginx_sites = []
+    firewall = {
+      allow_tcp      = []
+      allow_tcp_from = {}
+    }
+  }
+}
+
+# ── Two VPS (uncomment and replace the block above) ─────────────────────────
+# vps = {
+#   streaming = {
+#     ip          = "1.2.3.4"
+#     nginx_sites = ["play", "mist"]
+#     firewall = {
+#       allow_tcp = [22, 80]
+#       allow_tcp_from = {
+#         "4242" = ["5.6.7.8/32"]            # MistServer API — monitoring VPS
+#         "9101" = ["5.6.7.8/32"]            # TSduck exporter — monitoring VPS
+#       }
+#     }
+#   }
+#   monitoring = {
+#     ip          = "5.6.7.8"
+#     nginx_sites = ["monitoring", "onboard"]
+#     firewall = {
+#       allow_tcp = [22, 80]
+#       allow_tcp_from = {
+#         "3000" = ["YOUR_ADMIN_IP/32"]      # Grafana — platform admin only
+#       }
+#     }
+#   }
+# }
