@@ -62,7 +62,7 @@ After=network.target mistserver.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/ffmpeg -re -i ${MIST_HLS_URL} -c copy -f hls -hls_time 4 -hls_list_size 5 -hls_flags delete_segments+append_list -hls_segment_filename ${HLS_DIR}/seg_%%05d.ts ${HLS_DIR}/index.m3u8
+ExecStart=/usr/bin/ffmpeg -i ${MIST_HLS_URL} -c copy -f hls -hls_time 2 -hls_list_size 5 -hls_flags delete_segments+append_list+split_by_time -hls_segment_filename ${HLS_DIR}/seg_%%05d.ts ${HLS_DIR}/index.m3u8
 Restart=always
 RestartSec=5
 
