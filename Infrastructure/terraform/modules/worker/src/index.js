@@ -2,12 +2,13 @@
  * play.castology.tv — HLS delivery Worker
  *
  * Routes:
- *   GET /live/{stream}/index.m3u8   — playlist (short cache, auth required)
- *   GET /live/{stream}/*.ts         — segments  (long cache, auth required)
+ *   GET /live/{stream}/index.m3u8   — playlist (auth required, rewrites segment URLs)
+ *   GET /live/{stream}/*.ts         — segments  (auth required)
  *   GET /health                     — public health check
  *
  * Auth: Bearer token in Authorization header or ?token= query param.
- * Tokens are stored in the OPERATOR_TOKENS KV namespace as key=token, value=operator_id.
+ * Playlist segment URLs are rewritten to include ?token= so VLC and other
+ * players that don't forward auth headers can fetch segments correctly.
  */
 
 const CACHE_TTL_PLAYLIST = 2;    // seconds — short so operators get fresh segment lists
@@ -21,12 +22,10 @@ export default {
       return new Response("ok", { status: 200 });
     }
 
-    // Only serve /live/* paths from R2
     if (!url.pathname.startsWith("/live/")) {
       return new Response("Not found", { status: 404 });
     }
 
-    // Auth — Bearer token or ?token= query param
     const token = extractToken(request, url);
     if (!token) {
       return unauthorized("Missing token");
@@ -37,8 +36,7 @@ export default {
       return unauthorized("Invalid token");
     }
 
-    // Strip leading slash — R2 key matches the path without it
-    const key = url.pathname.slice(1); // e.g. "live/geo-news/index.m3u8"
+    const key = url.pathname.slice(1); // strip leading slash → R2 key
 
     const object = await env.HLS_BUCKET.get(key);
     if (!object) {
@@ -48,6 +46,29 @@ export default {
     const isPlaylist = key.endsWith(".m3u8");
     const contentType = isPlaylist ? "application/vnd.apple.mpegurl" : "video/mp2t";
     const cacheTtl = isPlaylist ? CACHE_TTL_PLAYLIST : CACHE_TTL_SEGMENT;
+
+    // Rewrite playlist segment lines to append ?token= so VLC fetches segments with auth
+    if (isPlaylist) {
+      const text = await object.text();
+      const rewritten = text.split("\n").map(line => {
+        const trimmed = line.trim();
+        if (trimmed && !trimmed.startsWith("#")) {
+          return trimmed.includes("?")
+            ? `${trimmed}&token=${token}`
+            : `${trimmed}?token=${token}`;
+        }
+        return line;
+      }).join("\n");
+
+      return new Response(rewritten, {
+        headers: {
+          "Content-Type":                contentType,
+          "Cache-Control":               `no-store`,
+          "Access-Control-Allow-Origin": "*",
+          "X-Operator-Id":               operatorId,
+        },
+      });
+    }
 
     return new Response(object.body, {
       headers: {
