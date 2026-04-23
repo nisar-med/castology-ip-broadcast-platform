@@ -60,9 +60,7 @@ variable "vps" {
     nginx_sites = list(string)
     firewall = object({
       allow_tcp      = list(number)
-      allow_udp      = list(number)
       allow_tcp_from = map(list(string))
-      allow_udp_from = map(list(string))
     })
   }))
 }

@@ -26,9 +26,7 @@ locals {
       nginx_sites = distinct(flatten([for e in entries : e.nginx_sites]))
       firewall = {
         allow_tcp      = distinct(flatten([for e in entries : e.firewall.allow_tcp]))
-        allow_udp      = distinct(flatten([for e in entries : e.firewall.allow_udp]))
         allow_tcp_from = merge([for e in entries : e.firewall.allow_tcp_from]...)
-        allow_udp_from = merge([for e in entries : e.firewall.allow_udp_from]...)
       }
     }
   }
@@ -47,6 +45,8 @@ module "mistserver" {
   srt_output_ports      = var.srt_output_ports
   api_port              = var.mist_api_port
   exporter_port         = var.exporter_port
+  pb_email              = var.pocketbase_admin_email
+  pb_password           = var.pocketbase_admin_password
 }
 
 # ---------------------------------------------------------------------------
@@ -108,9 +108,8 @@ module "firewall" {
   vps_ip               = each.value.ip
   ssh_private_key_path = var.ssh_private_key_path
   allow_tcp            = each.value.firewall.allow_tcp
-  allow_udp            = each.value.firewall.allow_udp
+  allow_udp            = concat([var.srt_ingest_port], var.srt_output_ports)
   allow_tcp_from       = each.value.firewall.allow_tcp_from
-  allow_udp_from       = each.value.firewall.allow_udp_from
 }
 
 # ---------------------------------------------------------------------------
@@ -143,7 +142,6 @@ module "worker" {
 
   account_id     = var.cloudflare_account_id
   r2_bucket_name = module.r2.bucket_name
-
   depends_on = [module.r2]
 }
 

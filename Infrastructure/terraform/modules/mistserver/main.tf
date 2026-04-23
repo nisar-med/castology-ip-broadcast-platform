@@ -78,3 +78,39 @@ resource "null_resource" "provision_exporter" {
 
   depends_on = [null_resource.provision]
 }
+
+resource "null_resource" "provision_srt_auth" {
+  triggers = {
+    script      = filemd5("${path.module}/../../scripts/mist-srt-auth.sh")
+    vps_ip      = var.vps_ip
+    pb_email    = var.pb_email
+    pb_password = var.pb_password
+  }
+
+  connection {
+    type        = "ssh"
+    host        = var.vps_ip
+    user        = "root"
+    private_key = file(var.ssh_private_key_path)
+    timeout     = "10m"
+  }
+
+  provisioner "remote-exec" {
+    inline = ["mkdir -p /opt/mist-scripts"]
+  }
+
+  provisioner "file" {
+    source      = "${path.module}/../../scripts/mist-srt-auth.sh"
+    destination = "/opt/mist-scripts/mist-srt-auth.sh"
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "chmod +x /opt/mist-scripts/mist-srt-auth.sh",
+      "printf 'PB_URL=http://127.0.0.1:8090\\nPB_EMAIL=${var.pb_email}\\nPB_PASS=${var.pb_password}\\n' > /etc/mist-auth.env",
+      "chmod 600 /etc/mist-auth.env",
+    ]
+  }
+
+  depends_on = [null_resource.provision]
+}

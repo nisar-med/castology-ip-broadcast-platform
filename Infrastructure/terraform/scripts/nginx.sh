@@ -74,6 +74,39 @@ fi
 #   ssh -L 4242:localhost:4242 root@<vps-ip>
 
 # ---------------------------------------------------------------------------
+# Site: stream.castology.tv → MistServer HLS :8080 (Worker origin, /hls/ only)
+# Grey-clouded DNS — not proxied through Cloudflare.
+# Only /hls/ is exposed; all other paths return 404.
+# ---------------------------------------------------------------------------
+if site_enabled "stream"; then
+  echo "==> Configuring stream.castology.tv"
+  cat > /etc/nginx/sites-available/stream.castology.tv << 'EOF'
+server {
+    listen 80;
+    server_name stream.castology.tv;
+
+    location /hls/ {
+        proxy_pass         http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+
+        proxy_read_timeout    30s;
+        proxy_connect_timeout 5s;
+
+        add_header Access-Control-Allow-Origin * always;
+    }
+
+    location / {
+        return 404;
+    }
+}
+EOF
+  ln -sf /etc/nginx/sites-available/stream.castology.tv \
+         /etc/nginx/sites-enabled/stream.castology.tv
+fi
+
+# ---------------------------------------------------------------------------
 # Site: monitoring.castology.tv → Grafana :3000
 # ---------------------------------------------------------------------------
 if site_enabled "monitoring"; then

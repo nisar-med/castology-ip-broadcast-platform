@@ -24,6 +24,8 @@ resource "cloudflare_workers_script" "hls_delivery" {
     name         = "OPERATOR_TOKENS"
     namespace_id = cloudflare_workers_kv_namespace.operator_tokens.id
   }
+
+
 }
 
 # KV namespace — key=token, value=operator_id
@@ -37,4 +39,10 @@ resource "cloudflare_workers_route" "play" {
   zone_id     = data.cloudflare_zone.castology_tv.id
   pattern     = "play.castology.tv/*"
   script_name = cloudflare_workers_script.hls_delivery.name
+}
+
+# Route: play.castology.tv/hls/* → no worker (bypass to origin, MistServer handles auth)
+resource "cloudflare_workers_route" "hls_bypass" {
+  zone_id = data.cloudflare_zone.castology_tv.id
+  pattern = "play.castology.tv/hls/*"
 }

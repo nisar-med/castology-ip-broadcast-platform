@@ -38,3 +38,15 @@ variable "exporter_port" {
   type        = number
   default     = 9101
 }
+
+variable "pb_email" {
+  description = "PocketBase admin email for SRT auth"
+  type        = string
+  default     = "admin@castology.tv"
+}
+
+variable "pb_password" {
+  description = "PocketBase admin password for SRT auth"
+  type        = string
+  sensitive   = true
+}
