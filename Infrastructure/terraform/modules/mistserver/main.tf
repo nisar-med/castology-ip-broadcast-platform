@@ -1,5 +1,6 @@
 locals {
   srt_output_csv = join(",", [for p in var.srt_output_ports : tostring(p)])
+  streams_json   = jsonencode([for n in var.stream_names : { name = n }])
 }
 
 resource "null_resource" "provision" {
@@ -38,12 +39,12 @@ resource "null_resource" "provision" {
 
 resource "null_resource" "provision_exporter" {
   triggers = {
-    exporter_script  = filemd5("${path.module}/../../scripts/tsduck-exporter.sh")
-    exporter_py      = filemd5("${path.module}/../../scripts/tsduck-exporter.py")
-    vps_ip           = var.vps_ip
-    srt_output_ports = local.srt_output_csv
-    exporter_port    = var.exporter_port
-    mist_api_port    = var.api_port
+    exporter_script = filemd5("${path.module}/../../scripts/tsduck-exporter.sh")
+    exporter_py     = filemd5("${path.module}/../../scripts/tsduck-exporter.py")
+    vps_ip          = var.vps_ip
+    stream_names    = join(",", var.stream_names)
+    exporter_port   = var.exporter_port
+    mist_api_port   = var.api_port
   }
 
   connection {
@@ -64,11 +65,16 @@ resource "null_resource" "provision_exporter" {
     destination = "/tmp/tsduck-exporter.py"
   }
 
+  # Write env file directly — avoids shell quoting issues with JSON
+  provisioner "file" {
+    content     = "STREAMS_JSON=${local.streams_json}\nEXPORTER_PORT=${var.exporter_port}\nMIST_API_PORT=${var.api_port}\n"
+    destination = "/etc/tsduck-exporter.env"
+  }
+
   provisioner "remote-exec" {
     inline = [
       "chmod +x /tmp/tsduck-exporter.sh",
       join(" ", [
-        "SRT_OUTPUT_PORTS=${local.srt_output_csv}",
         "MIST_API_PORT=${var.api_port}",
         "EXPORTER_PORT=${var.exporter_port}",
         "/tmp/tsduck-exporter.sh",

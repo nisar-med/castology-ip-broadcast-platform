@@ -45,6 +45,7 @@ module "mistserver" {
   srt_output_ports      = var.srt_output_ports
   api_port              = var.mist_api_port
   exporter_port         = var.exporter_port
+  stream_names          = var.stream_names
   pb_email              = var.pocketbase_admin_email
   pb_password           = var.pocketbase_admin_password
 }

@@ -39,6 +39,12 @@ variable "exporter_port" {
   default     = 9101
 }
 
+variable "stream_names" {
+  description = "Stream names to monitor (e.g. [\"geo+news\", \"geo+ent\"])"
+  type        = list(string)
+  default     = ["geo+news", "geo+ent"]
+}
+
 variable "pb_email" {
   description = "PocketBase admin email for SRT auth"
   type        = string

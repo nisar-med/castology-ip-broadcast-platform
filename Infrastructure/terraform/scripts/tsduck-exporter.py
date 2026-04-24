@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
 """
-TSduck Prometheus Exporter for MistServer streams.
+MistServer API Prometheus Exporter.
 
-Runs one tsp process per stream, tapping MistServer's SRT output port.
-Parses continuity counter errors and exposes them as Prometheus metrics
-on port 9101, which Prometheus scrapes.
-
-Each stream config:
-  name: stream name label (e.g. geo+ent)
-  port: SRT listener port on MistServer (e.g. 1238)
+Polls MistServer /api2 for active operator sessions and stream health.
+Also polls local filesystem + systemctl for R2 HLS pipeline health.
+Exposes metrics on port 9101 for Prometheus to scrape.
 """
 
 import json
@@ -16,7 +12,6 @@ import os
 import subprocess
 import threading
 import time
-import re
 import logging
 import sys
 import urllib.request
@@ -29,235 +24,268 @@ from prometheus_client import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-# ── Stream config ─────────────────────────────────────────────────────────────
+# ── Config ────────────────────────────────────────────────────────────────────
 
 _raw_streams = os.environ.get("STREAMS_JSON", "")
 STREAMS = json.loads(_raw_streams) if _raw_streams else [
     {"name": "geo+ent",  "port": 1238},
     {"name": "geo+news", "port": 1236},
 ]
+STREAM_NAMES = [s["name"] for s in STREAMS]
 
-METRICS_PORT   = int(os.environ.get("EXPORTER_PORT", "9101"))
-SRT_HOST       = "127.0.0.1"
-MIST_API_URL   = f"http://127.0.0.1:{os.environ.get('MIST_API_PORT', '4242')}"
-PUSH_POLL_SECS = 10
+METRICS_PORT     = int(os.environ.get("EXPORTER_PORT", "9101"))
+MIST_API_PORT    = os.environ.get("MIST_API_PORT", "4242")
+MIST_API_URL     = f"http://127.0.0.1:{MIST_API_PORT}/api2"
+SESSION_POLL_SECS = 10
+R2_POLL_SECS      = 5
+HLS_BASE_DIR      = "/var/lib/mist-hls"
 
 # ── Prometheus metrics ────────────────────────────────────────────────────────
 
 registry = CollectorRegistry()
 
-cc_errors = Counter(
-    "tsduck_cc_errors_total",
-    "Continuity counter errors in MPEG-TS stream (indicates dropped packets/frames)",
-    ["stream"],
+# Operator sessions (from /api2?clients)
+operator_sessions = Gauge(
+    "mist_operator_sessions_total",
+    "Active operator sessions per stream and direction",
+    ["stream", "direction"],
     registry=registry,
 )
-pcr_errors = Counter(
-    "tsduck_pcr_errors_total",
-    "PCR timing errors in MPEG-TS stream (indicates timing/jitter issues)",
-    ["stream"],
+session_bytes = Gauge(
+    "mist_operator_session_bytes",
+    "Bytes transferred per active operator session",
+    ["stream", "ip", "direction"],
     registry=registry,
 )
+session_uptime = Gauge(
+    "mist_operator_session_uptime_seconds",
+    "Uptime in seconds of active operator session",
+    ["stream", "ip"],
+    registry=registry,
+)
+
+# Stream health (from /api2?active_streams)
 stream_up = Gauge(
-    "tsduck_stream_up",
-    "1 if tsp is connected and receiving the stream, 0 otherwise",
+    "mist_stream_up",
+    "1 if stream is online in MistServer",
     ["stream"],
     registry=registry,
 )
-bitrate = Gauge(
-    "tsduck_bitrate_bps",
-    "Current MPEG-TS stream bitrate in bits per second",
+stream_bitrate = Gauge(
+    "mist_stream_bitrate_kbits",
+    "Per-track bitrate in kbits/s",
+    ["stream", "track"],
+    registry=registry,
+)
+stream_fps = Gauge(
+    "mist_stream_fps",
+    "Video frames per second",
+    ["stream"],
+    registry=registry,
+)
+stream_jitter = Gauge(
+    "mist_stream_jitter_ms",
+    "Stream jitter in milliseconds",
+    ["stream"],
+    registry=registry,
+)
+stream_buffer = Gauge(
+    "mist_stream_buffer_ms",
+    "Stream buffer size in milliseconds",
     ["stream"],
     registry=registry,
 )
 
-push_active = Gauge(
-    "mist_push_active_connections",
-    "Number of active outbound SRT push connections for the stream",
+# R2 HLS pipeline (filesystem + systemctl)
+r2_ffmpeg_up = Gauge(
+    "r2_ffmpeg_up",
+    "1 if ffmpeg HLS writer service is active",
     ["stream"],
     registry=registry,
 )
-push_bytes_sent = Counter(
-    "mist_push_bytes_sent_total",
-    "Total bytes sent over active push connections for the stream",
+r2_segment_lag = Gauge(
+    "r2_segment_lag_count",
+    "HLS segments written locally but not yet in R2",
     ["stream"],
     registry=registry,
 )
-push_uptime = Gauge(
-    "mist_push_uptime_seconds",
-    "Uptime in seconds of the longest-running active push connection",
+r2_segment_age = Gauge(
+    "r2_latest_segment_age_seconds",
+    "Age in seconds of the most recently written local HLS segment",
+    ["stream"],
+    registry=registry,
+)
+r2_upload_errors = Counter(
+    "r2_upload_errors_total",
+    "Upload errors from the seg-push service",
     ["stream"],
     registry=registry,
 )
 
-# Initialise labels so metrics appear even before first event
-for s in STREAMS:
-    cc_errors.labels(stream=s["name"])
-    pcr_errors.labels(stream=s["name"])
-    stream_up.labels(stream=s["name"]).set(0)
-    bitrate.labels(stream=s["name"]).set(0)
-    push_active.labels(stream=s["name"]).set(0)
-    push_bytes_sent.labels(stream=s["name"])
-    push_uptime.labels(stream=s["name"]).set(0)
+# Initialise labels so metrics appear even before first poll
+for _s in STREAM_NAMES:
+    stream_up.labels(stream=_s).set(0)
+    stream_fps.labels(stream=_s).set(0)
+    stream_jitter.labels(stream=_s).set(0)
+    stream_buffer.labels(stream=_s).set(0)
+    r2_ffmpeg_up.labels(stream=_s).set(0)
+    r2_segment_lag.labels(stream=_s).set(0)
+    r2_segment_age.labels(stream=_s).set(0)
+    r2_upload_errors.labels(stream=_s)
 
-# ── TSP runner ────────────────────────────────────────────────────────────────
+# ── MistServer API helpers ────────────────────────────────────────────────────
 
-def run_tsp(stream_name: str, port: int):
-    """
-    Runs tsp in a loop, connecting to MistServer's SRT listener port.
-    Parses JSON log lines for CC errors and PCR errors.
-    Reconnects automatically on disconnect.
-    """
-    label = {"stream": stream_name}
+def mist_get(query_param: str) -> dict:
+    url = f"{MIST_API_URL}?{query_param}"
+    with urllib.request.urlopen(url, timeout=5) as resp:
+        return json.loads(resp.read())
 
-    while True:
-        log.info("[%s] Starting tsp on SRT port %d", stream_name, port)
-        cmd = [
-            "tsp",
-            "--realtime",
-            # Input: connect to MistServer SRT output as a caller
-            "-I", "srt",
-            "--caller", f"{SRT_HOST}:{port}",
-            "--streamid", stream_name,
-            "--latency", "500",
-            # Plugin: check continuity counters, report errors as JSON
-            "-P", "continuity",
-            "--json-line=CC:",
-            # Plugin: monitor bitrate every 5s, report as JSON
-            "-P", "bitrate_monitor",
-            "--periodic-bitrate", "5",
-            "--json-line=BR:",
-            # Drop output — we only want the analysis
-            "-O", "drop",
-        ]
 
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-            )
-            stream_up.labels(**label).set(1)
+# ── Session + stream health poller ───────────────────────────────────────────
 
-            for line in proc.stdout:
-                line = line.strip()
-                if not line:
-                    continue
-
-                # Continuity counter error JSON
-                if line.startswith("CC:"):
-                    try:
-                        data = json.loads(line[3:])
-                        errors = data.get("error_count", 0)
-                        if errors:
-                            cc_errors.labels(**label).inc(errors)
-                            log.warning("[%s] CC errors: %d", stream_name, errors)
-                    except json.JSONDecodeError:
-                        pass
-
-                # Bitrate JSON
-                elif line.startswith("BR:"):
-                    try:
-                        data = json.loads(line[3:])
-                        bps = data.get("bitrate", 0)
-                        bitrate.labels(**label).set(bps)
-                    except json.JSONDecodeError:
-                        pass
-
-                # Log any tsp errors
-                elif "error" in line.lower() or "warning" in line.lower():
-                    log.debug("[%s] tsp: %s", stream_name, line)
-
-            proc.wait()
-
-        except Exception as e:
-            log.error("[%s] tsp exception: %s", stream_name, e)
-        finally:
-            stream_up.labels(**label).set(0)
-            bitrate.labels(**label).set(0)
-
-        log.info("[%s] tsp disconnected, reconnecting in 5s...", stream_name)
-        time.sleep(5)
-
-# ── MistServer push_list poller ───────────────────────────────────────────────
-
-def poll_push_list():
-    """
-    Polls MistServer push_list API every PUSH_POLL_SECS seconds.
-    MistServer runs in local mode so no auth is required from localhost.
-    push_list entries are arrays; index 5 is a stats dict when the push is active.
-
-    push entry layout (from MistServer docs/observation):
-      [0] push_id (int)
-      [1] stream_name (str)
-      [2] target_uri (str)
-      [3] ... (push config)
-      [4] ... (push config)
-      [5] stats dict OR 0 when not yet connected
-            stats keys: bytes, ms (uptime), active_seconds, etc.
-    """
-    # Track bytes sent per push_id so we can increment the Counter correctly
-    _prev_bytes: dict[int, int] = {}
-
+def poll_sessions_and_streams():
     while True:
         try:
-            payload = json.dumps({"push_list": 1}).encode()
-            req = urllib.request.Request(
-                MIST_API_URL,
-                data=payload,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                data = json.loads(resp.read())
-
-            entries = data.get("push_list", [])
-
-            # Aggregate per stream name
-            counts: dict[str, int]   = {}
-            uptime: dict[str, float] = {}
-            delta_bytes: dict[str, int] = {}
-
-            for entry in entries:
-                if not isinstance(entry, list) or len(entry) < 6:
-                    continue
-                push_id    = entry[0]
-                stream     = entry[1]
-                stats      = entry[5]
-                if not isinstance(stats, dict):
-                    continue  # pending / not yet connected
-
-                counts[stream]      = counts.get(stream, 0) + 1
-                sent                = stats.get("bytes", 0)
-                prev                = _prev_bytes.get(push_id, sent)
-                delta_bytes[stream] = delta_bytes.get(stream, 0) + max(0, sent - prev)
-                _prev_bytes[push_id] = sent
-
-                ms = stats.get("ms", 0)
-                uptime[stream] = max(uptime.get(stream, 0), ms / 1000.0)
-
-            # Remove stale push_ids that disappeared from the list
-            active_ids = {e[0] for e in entries if isinstance(e, list) and len(e) >= 1}
-            for pid in list(_prev_bytes):
-                if pid not in active_ids:
-                    del _prev_bytes[pid]
-
-            # Update metrics for all known streams
-            for s in STREAMS:
-                name = s["name"]
-                push_active.labels(stream=name).set(counts.get(name, 0))
-                push_uptime.labels(stream=name).set(uptime.get(name, 0))
-                if delta_bytes.get(name, 0) > 0:
-                    push_bytes_sent.labels(stream=name).inc(delta_bytes[name])
-
-        except urllib.error.URLError as e:
-            log.warning("push_list poll failed: %s", e)
+            _poll_clients()
         except Exception as e:
-            log.error("push_list poll error: %s", e)
+            log.warning("clients poll error: %s", e)
+        try:
+            _poll_active_streams()
+        except Exception as e:
+            log.warning("active_streams poll error: %s", e)
+        time.sleep(SESSION_POLL_SECS)
 
-        time.sleep(PUSH_POLL_SECS)
+
+def _poll_clients():
+    data = mist_get("clients")
+    # Response: {"streams": {"geo+news": {"clients": [...]}}}
+    streams_data = data.get("streams", {})
+
+    # Clear old per-session gauges before repopulating
+    session_bytes.clear()
+    session_uptime.clear()
+
+    counts: dict[tuple[str, str], int] = {}
+
+    for stream_name, stream_info in streams_data.items():
+        if stream_name not in STREAM_NAMES:
+            continue
+        clients = stream_info.get("clients", [])
+        for client in clients:
+            if not isinstance(client, dict):
+                continue
+            direction = client.get("direction", "unknown")
+            ip = client.get("ip", "unknown")
+            # Strip IPv6-mapped prefix
+            ip = ip.replace("::ffff:", "").strip("[]").split(":")[0] if "::ffff:" in ip or ip.startswith("[") else ip
+            bytes_val = client.get("bytes", 0)
+            uptime_ms = client.get("ms", 0)
+
+            key = (stream_name, direction)
+            counts[key] = counts.get(key, 0) + 1
+            session_bytes.labels(stream=stream_name, ip=ip, direction=direction).set(bytes_val)
+            session_uptime.labels(stream=stream_name, ip=ip).set(uptime_ms / 1000.0)
+
+    # Reset all known stream/direction combos to 0, then set actuals
+    for name in STREAM_NAMES:
+        for direction in ("input", "output", "unknown"):
+            operator_sessions.labels(stream=name, direction=direction).set(
+                counts.get((name, direction), 0)
+            )
+
+
+def _poll_active_streams():
+    data = mist_get("active_streams")
+    active = data.get("active_streams", {})
+
+    for name in STREAM_NAMES:
+        if name not in active:
+            stream_up.labels(stream=name).set(0)
+            stream_fps.labels(stream=name).set(0)
+            stream_jitter.labels(stream=name).set(0)
+            stream_buffer.labels(stream=name).set(0)
+            continue
+
+        stream_up.labels(stream=name).set(1)
+        info = active[name]
+
+        # Per-track bitrate
+        tracks = info.get("tracks", {})
+        for track_id, track in tracks.items():
+            codec = track.get("codec", track_id)
+            bps = track.get("bps", 0)
+            stream_bitrate.labels(stream=name, track=codec).set(bps / 1000.0)
+            if track.get("type") == "video":
+                fps = track.get("fpks", 0) / 1000.0
+                stream_fps.labels(stream=name).set(fps)
+
+        stream_jitter.labels(stream=name).set(info.get("jitter", 0))
+        stream_buffer.labels(stream=name).set(info.get("buffer", 0))
+
+
+# ── R2 pipeline poller ───────────────────────────────────────────────────────
+
+def _seg_number(filename: str) -> int:
+    try:
+        return int(filename.replace("seg_", "").replace(".ts", ""))
+    except ValueError:
+        return -1
+
+
+def poll_r2_pipeline():
+    _prev_error_counts: dict[str, int] = {}
+
+    while True:
+        for s in STREAMS:
+            name = s["name"]
+            safe = name.replace("+", "-").replace(" ", "-")
+            hls_dir = os.path.join(HLS_BASE_DIR, name)
+            label = {"stream": name}
+
+            try:
+                result = subprocess.run(
+                    ["systemctl", "is-active", f"mist-hls-writer-{safe}"],
+                    capture_output=True, text=True
+                )
+                r2_ffmpeg_up.labels(**label).set(1 if result.stdout.strip() == "active" else 0)
+            except Exception:
+                r2_ffmpeg_up.labels(**label).set(0)
+
+            try:
+                segs = [f for f in os.listdir(hls_dir) if f.startswith("seg_") and f.endswith(".ts")]
+                if segs:
+                    segs.sort(key=_seg_number)
+                    latest_local = _seg_number(segs[-1])
+                    mtime = os.path.getmtime(os.path.join(hls_dir, segs[-1]))
+                    r2_segment_age.labels(**label).set(time.time() - mtime)
+
+                    playlist_path = os.path.join(hls_dir, "index.m3u8")
+                    if os.path.exists(playlist_path):
+                        with open(playlist_path) as f:
+                            playlist_segs = [l.strip() for l in f if l.strip() and not l.startswith("#")]
+                        if playlist_segs:
+                            latest_playlist = _seg_number(playlist_segs[-1])
+                            r2_segment_lag.labels(**label).set(max(0, latest_local - latest_playlist))
+            except Exception as e:
+                log.debug("[r2-poll] %s segment check: %s", name, e)
+
+            try:
+                result = subprocess.run(
+                    ["journalctl", "-u", f"mist-seg-push-{safe}",
+                     "--since", f"{R2_POLL_SECS + 2}s ago",
+                     "--no-pager", "-o", "cat"],
+                    capture_output=True, text=True
+                )
+                error_count = result.stdout.lower().count("[seg-push]")
+                prev = _prev_error_counts.get(name, 0)
+                delta = max(0, error_count - prev)
+                if delta:
+                    r2_upload_errors.labels(**label).inc(delta)
+                _prev_error_counts[name] = error_count
+            except Exception:
+                pass
+
+        time.sleep(R2_POLL_SECS)
 
 
 # ── HTTP server ───────────────────────────────────────────────────────────────
@@ -275,26 +303,18 @@ class MetricsHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def log_message(self, format, *args):
-        pass  # suppress HTTP access log noise
+        pass
+
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # Start one monitoring thread per stream
-    for stream in STREAMS:
-        t = threading.Thread(
-            target=run_tsp,
-            args=(stream["name"], stream["port"]),
-            daemon=True,
-        )
-        t.start()
-        log.info("Started monitor for stream '%s' on port %d", stream["name"], stream["port"])
+    threading.Thread(target=poll_sessions_and_streams, daemon=True, name="mist-api-poller").start()
+    log.info("Started MistServer API poller (interval %ds)", SESSION_POLL_SECS)
 
-    # Start push_list poller
-    threading.Thread(target=poll_push_list, daemon=True, name="push-list-poller").start()
-    log.info("Started push_list poller (interval %ds)", PUSH_POLL_SECS)
+    threading.Thread(target=poll_r2_pipeline, daemon=True, name="r2-pipeline-poller").start()
+    log.info("Started R2 pipeline poller (interval %ds)", R2_POLL_SECS)
 
-    # Start Prometheus metrics HTTP server
     server = HTTPServer(("0.0.0.0", METRICS_PORT), MetricsHandler)
     log.info("Prometheus metrics available at http://localhost:%d/metrics", METRICS_PORT)
     try:
