@@ -1,105 +1,56 @@
-# Castology IP Broadcast Platform — Copilot Context
+# Castology IP Broadcast Platform
 
-## What This Project Does
+## Validation commands
 
-Live video broadcast platform: encoders push SRT streams into MistServer, which packages them as HLS and delivers to cable operators via SRT pull or HLS. Segments are also pushed to Cloudflare R2 for CDN HLS delivery.
+This repo is primarily Terraform plus provisioning scripts.
 
-## Infrastructure
+- Terraform root: `cd Infrastructure/terraform`
+- First-time setup: `terraform init`
+- Format check: `terraform fmt -check -recursive`
+- Validate config: `terraform validate`
+- Preview changes: `terraform plan`
+- Target a single component when iterating on one area:
+  - `terraform apply -target=module.worker`
+  - `terraform apply -target=module.mistserver`
+  - `terraform apply -target=null_resource.mistserver_r2_push`
+- Existing Python utility: `python3 tools/hls-loadtest.py --help`
+- Focused load-test run: `python3 tools/hls-loadtest.py --operators 1 --duration 30 --stream geo+news --token <token>`
 
-- **VPS:** `83.147.18.124` (Ubuntu 22.04) — MistServer, nginx, PocketBase, Prometheus, Grafana
-- **Cloudflare:** R2 bucket `castology-hls`, Worker at `play.castology.tv`, KV namespace `OPERATOR_TOKENS`
-- **Terraform:** all infrastructure is code in `Infrastructure/terraform/`
+There is no in-repo automated test suite or per-test runner today. Targeted `terraform apply` is the normal narrow-scope validation path.
 
-## Stream Naming
+## High-level architecture
 
-Streams use `+` as separator: `geo+news`, `geo+ent`. The `+` is significant — do not replace with `-` in stream names. Systemd unit names use `-` as safe name (e.g. `geo-news`).
+The main control plane is `Infrastructure/terraform/main.tf`. It wires Cloudflare resources and VPS provisioning together with Terraform modules plus `null_resource` + SSH `remote-exec` scripts. `local.unique_vps` deduplicates shared IPs, so nginx and firewall config are merged per unique server even when `streaming` and `monitoring` point at the same host.
 
-## Cable Operator Auth
+MistServer is provisioned by `modules/mistserver` and `scripts/mistserver.sh`. It accepts SRT ingest on port `1235`, exposes HLS on `:8080`, and creates a wildcard `geo` push source so encoders can publish streams like `geo+news`. The same module also installs the Prometheus exporter and the `PLAY_REWRITE` auth hook in `scripts/mist-srt-auth.sh`.
 
-**MistServer PLAY_REWRITE trigger:** `Infrastructure/terraform/scripts/mist-srt-auth.sh`
+Delivery has two distinct paths that must not be conflated:
 
-- Deployed to `/opt/mist-scripts/mist-srt-auth.sh` on the VPS
-- Validates every new session (SRT and HLS) against PocketBase
-- Two factors: `token_key` (unique per operator) + `allowed_ips` (static IPs/CIDRs)
-- Credentials loaded from `/etc/mist-auth.env` (never hardcode in script)
-- Logs via `logger -t mist-srt-auth` → `journalctl -t mist-srt-auth -f`
+- `play.castology.tv/live/*` is served by the Cloudflare Worker in `modules/worker/src/index.js`. It authenticates tokens from KV (`OPERATOR_TOKENS`), serves playlists and segments from R2, and rewrites playlist entries to append the caller token.
+- `play.castology.tv/hls/*` intentionally bypasses the Worker and goes through nginx to MistServer origin. Authentication on that path happens inside MistServer through the `PLAY_REWRITE` trigger, not in the Worker.
 
-**SRT streamid format:** `geo+news/TOKEN` (MistServer decodes `+` as space — script restores it)
+The HLS-to-R2 pipeline is installed by `null_resource.mistserver_r2_push` via `scripts/mistserver-r2-push.sh`. For each stream it creates:
 
-**HLS token:** `?token=TOKEN` in request URL. Sub-requests use `?tkn=` (MistServer session) — pass through without re-validation.
+- an ffmpeg writer service that pulls MistServer HLS from localhost and writes segments to `/var/lib/mist-hls/{stream}/`
+- a Python uploader service that reads `index.m3u8`, uploads new `.ts` segments and the playlist to R2 with boto3
+- a cleanup service/timer that deletes old `.ts` objects from R2 and local disk
 
-## PocketBase Collections
+PocketBase is provisioned by `scripts/pocketbase.sh`. The current collections are `broadcasters` and `affiliates`. `affiliates` drives playout auth; `broadcasters` is used by monitoring/exporter logic.
 
-- `channel_groups`: `token_key`, `channels` (JSON array `[{name, stream}]`), `allowed_ips` (comma-separated), `active`
-- `cable_operators`: `company_name`, `group_id`, `active`, `email`, `contact_name`
+## Key conventions
 
-PocketBase runs at `http://127.0.0.1:8090`. Auth: superusers collection, `auth-with-password` endpoint.
+- Stream names use `+` as a meaningful separator: `geo+news`, `geo+ent`. Do not replace `+` with `-` in real stream identifiers. Hyphenated names are only for derived safe names like systemd units (`mist-hls-writer-geo-news`).
+- Keep the Worker path and MistServer-origin path aligned when changing auth or playback behavior. `/live/*` uses Cloudflare KV + R2; `/hls/*` uses MistServer `PLAY_REWRITE`.
+- `mist-srt-auth.sh` restores `+` after MistServer decodes it as a space, reads affiliate tokens from `token_key`, and allows HLS sub-requests with `?tkn=` to pass through without revalidation. Preserve that behavior unless you are intentionally changing session handling.
+- The ffmpeg wrapper in `mistserver-r2-push.sh` fetches the master playlist from localhost, extracts the track playlist, and strips MistServer's rotating `?tkn=` token before handing the URL to ffmpeg. That token-stripping is required so long-running ffmpeg jobs survive token rotation.
+- Use PocketBase `affiliates` fields `token_key`, `streams`, `allowed_ips`, and `active` for viewer/operator authorization. Older notes about `channel_groups` or `cable_operators` are stale.
+- Worker KV values are JSON shaped like `{"affiliate":"Name","streams":["geo+news","geo+ent"]}`. If you change token payload structure, update both the Worker and any onboarding/runbook docs.
+- Provisioning is script-driven and idempotent. Most Terraform resources re-run because of `filemd5(...)` trigger changes in the shell/Python scripts, not because of cloud-init or image baking.
+- Secrets belong in Terraform sensitive variables or deployed env files such as `/etc/mist-auth.env` and `/etc/mist-exporter.env`, never in checked-in scripts.
+- MistServer API and PocketBase admin are intentionally accessed through SSH tunnels rather than public nginx routes. Preserve that access model unless the infrastructure design changes.
+- The root Terraform defaults and `terraform.tfvars.example` still show `geo-news`/`geo-ent` in some places, but the active MistServer/Worker/auth flow uses `geo+...` names. Treat `+` naming as authoritative unless you are intentionally performing a repo-wide migration.
 
-## HLS Delivery Routes
+## Reference docs
 
-| Path | Handler | Auth |
-|---|---|---|
-| `play.castology.tv/live/*` | Cloudflare Worker → R2 | KV token lookup |
-| `play.castology.tv/hls/*` | bypass Worker → nginx → MistServer:8080 | PLAY_REWRITE trigger |
-| `play.castology.tv/playlist` | Cloudflare Worker | KV token lookup |
-| `stream.castology.tv/hls/*` | nginx → MistServer:8080 (grey-cloud, no CF proxy) | PLAY_REWRITE trigger |
-
-## Cloudflare Worker
-
-File: `Infrastructure/terraform/modules/worker/src/index.js`
-
-- KV format: `token → {"broadcaster":"geo","channels":[{"name":"...","stream":"..."}]}`
-- `broadcaster` is the stream prefix (e.g. `geo` for `geo+news`)
-- `/hls/*` route has no Worker assigned — bypasses to origin
-
-## Terraform Conventions
-
-- All VPS provisioning uses `null_resource` with SSH `remote-exec` — no cloud-init
-- Re-provision triggers are `filemd5()` on scripts + key config values
-- `terraform apply -target=module.worker` to deploy Worker only
-- Secrets never in scripts — use env files or Terraform `sensitive` variables
-- `terraform.tfvars` is gitignored (contains credentials)
-
-## nginx Sites
-
-Managed by `Infrastructure/terraform/scripts/nginx.sh` via `NGINX_SITES` env var.
-Valid sites: `play`, `mist`, `monitoring`, `onboard`, `stream`
-
-- `play` → MistServer:8080
-- `stream` → MistServer:8080, `/hls/` only (Worker bypass origin)
-- `onboard` → PocketBase:8090 + `/var/www/onboard` static portal
-
-## Operator Onboarding Checklist
-
-1. Create `channel_group` in PocketBase (`token_key`, `channels`, `allowed_ips`, `active=true`)
-2. Create `cable_operators` record (`group_id`, `active=true`, `email`, `contact_name`)
-3. Write token to Cloudflare KV for `/live/` delivery
-4. Give operator: SRT URL `srt://stream.castology.tv:1234?streamid=STREAM/TOKEN&latency=1000`
-5. Give operator: HLS URL `https://play.castology.tv/hls/STREAM/index.m3u8?token=TOKEN`
-
-## Common Debugging
-
-```bash
-# Auth decisions (SRT + HLS)
-journalctl -t mist-srt-auth -f
-
-# MistServer events
-journalctl -u mistserver -f | grep -E "FAIL|ACCS|REWRITE"
-
-# HLS pipeline
-journalctl -u mist-hls-writer-geo-news -f
-journalctl -u mist-seg-push-geo-news -f
-
-# Prometheus metrics
-curl -s localhost:9101/metrics | grep r2_
-```
-
-## Key File Locations on VPS
-
-| Path | Purpose |
-|---|---|
-| `/opt/mist-scripts/mist-srt-auth.sh` | PLAY_REWRITE trigger |
-| `/etc/mist-auth.env` | PocketBase credentials (chmod 600) |
-| `/etc/mistserver.conf` | MistServer config |
-| `/var/lib/mist-hls/{stream}/` | HLS segment working dir |
-| `/etc/nginx/sites-enabled/` | nginx site configs |
+- `docs/solution-design.md` is the best high-level system overview and operational runbook.
+- `docs/mistserver-api.md` documents the MistServer API shapes used by `scripts/mist-exporter.py`.

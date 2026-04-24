@@ -9,6 +9,7 @@ PROMETHEUS_PASSPHRASE="${PROMETHEUS_PASSPHRASE:?PROMETHEUS_PASSPHRASE must be se
 MIST_API_PORT="${MIST_API_PORT:-4242}"
 EXPORTER_PORT="${EXPORTER_PORT:-9101}"
 GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set}"
+PROMETHEUS_SCRAPE_HOST="${PROMETHEUS_SCRAPE_HOST:-localhost}"
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -42,14 +43,14 @@ scrape_configs:
     scrape_timeout: 10s
     metrics_path: "/${PROMETHEUS_PASSPHRASE}"
     static_configs:
-      - targets: ["${STREAMING_PRIVATE_IP}:${MIST_API_PORT}"]
+      - targets: ["${PROMETHEUS_SCRAPE_HOST}:${MIST_API_PORT}"]
         labels:
           instance: "mist-streaming"
 
   - job_name: "mist-exporter"
     scrape_interval: 10s
     static_configs:
-      - targets: ["${STREAMING_PRIVATE_IP}:${EXPORTER_PORT}"]
+      - targets: ["${PROMETHEUS_SCRAPE_HOST}:${EXPORTER_PORT}"]
         labels:
           instance: "mist-streaming"
 EOF
@@ -97,52 +98,159 @@ for DASH_ID in 1096 4526 4529; do
     | jq -r '"Dashboard \(.title): \(.importedUrl)"' || echo "==> Dashboard ${DASH_ID} import failed"
 done
 
+# Narrow the imported MistServer Vitals server filter to actual Mist targets.
+VITALS_FILE=$(mktemp)
+if curl -sf "http://${GRAFANA_AUTH}@localhost:3000/api/dashboards/uid/000000009" > "${VITALS_FILE}"; then
+  python3 - "${VITALS_FILE}" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+payload = json.loads(path.read_text())
+dashboard = payload["dashboard"]
+for var in dashboard.get("templating", {}).get("list", []):
+    if var.get("name") == "srv":
+        var["query"] = "label_values(mist_cpu{job=\"mistserver\"}, instance)"
+        var["definition"] = var["query"]
+        var["current"] = {"selected": False, "text": "mist-streaming", "value": "mist-streaming"}
+        break
+path.write_text(json.dumps({"dashboard": dashboard, "overwrite": True, "folderId": 0}))
+PY
+
+  curl -sf -X POST "http://${GRAFANA_AUTH}@localhost:3000/api/dashboards/db" \
+    -H "Content-Type: application/json" \
+    -d @"${VITALS_FILE}" \
+    | jq -r '"Vitals dashboard: \(.url)"' \
+    || echo "==> MistServer Vitals patch failed"
+else
+  echo "==> MistServer Vitals dashboard fetch failed"
+fi
+rm -f "${VITALS_FILE}"
+
 # Import broadcast quality dashboard
+# Look up the actual datasource UID assigned by Grafana at install time
+DS_UID=$(curl -sf "http://${GRAFANA_AUTH}@localhost:3000/api/datasources/name/Prometheus" | python3 -c 'import sys,json; print(json.load(sys.stdin)["uid"])')
+echo "==> Prometheus datasource UID: ${DS_UID}"
+
+# Build dashboard JSON in a temp file to avoid shell escaping issues with HERE-doc
+DASH_FILE=$(mktemp)
+cat > "${DASH_FILE}" << DASHEOF
+{
+  "dashboard": {
+    "title": "MistServer Session Status",
+    "uid": "mist-bq",
+    "tags": ["mistserver", "broadcast"],
+    "timezone": "browser",
+    "refresh": "10s",
+    "schemaVersion": 36,
+    "templating": {"list": [
+      {"name": "stream", "label": "Stream", "type": "query",
+       "datasource": {"type": "prometheus", "uid": "${DS_UID}"},
+       "query": {"query": "label_values(mist_ingest_status{job=\"mist-exporter\"}, stream)", "refId": "A"},
+       "includeAll": true, "multi": true,
+       "current": {"text": "All", "value": "\$__all"}, "refresh": 2, "sort": 1}
+    ]},
+    "panels": [
+      {
+        "id": 1, "type": "table", "title": "Broadcasters (Desired vs Live)",
+        "gridPos": {"x": 0, "y": 0, "w": 24, "h": 8},
+        "options": {"sortBy": [{"displayName": "Name", "desc": false}]},
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "label_replace(mist_ingest_status{job=\"mist-exporter\", stream=~\"\$stream\"}, \"broadcaster\", \"\$1\", \"name\", \"(.*)\")",
+            "instant": true, "format": "table", "legendFormat": "",
+            "datasource": {"type": "prometheus", "uid": "${DS_UID}"}
+          },
+          {
+            "refId": "B",
+            "expr": "label_replace(mist_ingest_jitter_ms{job=\"mist-exporter\", stream=~\"\$stream\"}, \"broadcaster\", \"\$1\", \"name\", \"(.*)\")",
+            "instant": true, "format": "table", "legendFormat": "",
+            "datasource": {"type": "prometheus", "uid": "${DS_UID}"}
+          },
+          {
+            "refId": "C",
+            "expr": "label_replace(mist_ingest_loss{job=\"mist-exporter\", stream=~\"\$stream\"}, \"broadcaster\", \"\$1\", \"name\", \"(.*)\")",
+            "instant": true, "format": "table", "legendFormat": "",
+            "datasource": {"type": "prometheus", "uid": "${DS_UID}"}
+          }
+        ],
+        "transformations": [
+          {"id": "filterFieldsByName", "options": {"include": {"pattern": "^(broadcaster|stream|ip|Value.*)$"}}},
+          {"id": "merge", "options": {}},
+          {"id": "organize", "options": {
+            "includeByName": {"broadcaster": true, "stream": true, "ip": true, "Value #A": true, "Value #B": true, "Value #C": true},
+            "indexByName": {"broadcaster": 0, "stream": 1, "ip": 2, "Value #A": 3, "Value #B": 4, "Value #C": 5},
+            "renameByName": {"broadcaster": "Name", "stream": "Stream", "ip": "IP", "Value #A": "Status", "Value #B": "Jitter (ms)", "Value #C": "Loss"}
+          }}
+        ],
+        "fieldConfig": {"defaults": {"custom": {"filterable": true}}, "overrides": [
+          {"matcher": {"id": "byName", "options": "Status"}, "properties": [
+            {"id": "custom.displayMode", "value": "color-background"},
+            {"id": "mappings", "value": [{"type": "value", "options": {"0": {"text": "OFFLINE", "color": "red"}, "1": {"text": "ONLINE", "color": "green"}}}]},
+            {"id": "thresholds", "value": {"mode": "absolute", "steps": [{"color": "red", "value": 0}, {"color": "green", "value": 1}]}}
+          ]},
+          {"matcher": {"id": "byName", "options": "Loss"}, "properties": [
+            {"id": "unit", "value": "percentunit"},
+            {"id": "custom.displayMode", "value": "color-background"},
+            {"id": "thresholds", "value": {"mode": "absolute", "steps": [{"color": "green", "value": 0}, {"color": "yellow", "value": 0.005}, {"color": "red", "value": 0.02}]}}
+          ]},
+          {"matcher": {"id": "byName", "options": "Jitter (ms)"}, "properties": [
+            {"id": "unit", "value": "ms"},
+            {"id": "custom.displayMode", "value": "color-background"},
+            {"id": "thresholds", "value": {"mode": "absolute", "steps": [{"color": "green", "value": 0}, {"color": "yellow", "value": 50}, {"color": "red", "value": 200}]}}
+          ]}
+        ]}
+      },
+      {
+        "id": 2, "type": "table", "title": "Affiliates (Desired vs Live)",
+        "gridPos": {"x": 0, "y": 8, "w": 24, "h": 8},
+        "options": {"sortBy": [{"displayName": "Name", "desc": false}]},
+        "targets": [{
+          "refId": "A",
+          "expr": "{__name__=~\"mist_playout_status|mist_playout_loss|mist_playout_uptime_seconds|mist_playout_bytes\", job=\"mist-exporter\", stream=~\"\$stream\"}",
+          "instant": true, "format": "table", "legendFormat": "",
+          "datasource": {"type": "prometheus", "uid": "${DS_UID}"}
+        }],
+        "transformations": [
+          {"id": "partitionByValues", "options": {"fields": ["__name__"], "keepFields": false}},
+          {"id": "filterFieldsByName", "options": {"include": {"pattern": "^(name|stream|ip|mist_playout_.*)$"}}},
+          {"id": "merge", "options": {}},
+          {"id": "filterFieldsByName", "options": {"include": {"names": ["name", "stream", "ip", "mist_playout_status", "mist_playout_loss", "mist_playout_uptime_seconds", "mist_playout_bytes"]}}},
+          {"id": "organize", "options": {
+            "indexByName": {"name": 0, "stream": 1, "ip": 2, "mist_playout_status": 3, "mist_playout_loss": 4, "mist_playout_uptime_seconds": 5, "mist_playout_bytes": 6},
+            "renameByName": {"name": "Name", "stream": "Stream", "ip": "IP", "mist_playout_status": "Status", "mist_playout_loss": "Loss", "mist_playout_uptime_seconds": "Uptime", "mist_playout_bytes": "Bytes"}
+          }}
+        ],
+        "fieldConfig": {"defaults": {"custom": {"filterable": true}}, "overrides": [
+          {"matcher": {"id": "byName", "options": "Status"}, "properties": [
+            {"id": "custom.displayMode", "value": "color-background"},
+            {"id": "mappings", "value": [{"type": "value", "options": {"0": {"text": "OFFLINE", "color": "red"}, "1": {"text": "ONLINE", "color": "green"}}}]},
+            {"id": "thresholds", "value": {"mode": "absolute", "steps": [{"color": "red", "value": 0}, {"color": "green", "value": 1}]}}
+          ]},
+          {"matcher": {"id": "byName", "options": "Loss"}, "properties": [
+            {"id": "unit", "value": "percentunit"},
+            {"id": "custom.displayMode", "value": "color-background"},
+            {"id": "thresholds", "value": {"mode": "absolute", "steps": [{"color": "green", "value": 0}, {"color": "yellow", "value": 0.005}, {"color": "red", "value": 0.02}]}}
+          ]},
+          {"matcher": {"id": "byName", "options": "Uptime"}, "properties": [{"id": "unit", "value": "s"}]},
+          {"matcher": {"id": "byName", "options": "Bytes"}, "properties": [{"id": "unit", "value": "bytes"}]}
+        ]}
+      }
+    ]
+  },
+  "overwrite": true,
+  "folderId": 0
+}
+DASHEOF
+
 curl -sf -X POST "http://${GRAFANA_AUTH}@localhost:3000/api/dashboards/import" \
   -H "Content-Type: application/json" \
-  -d '{
-    "dashboard": {
-      "title": "MistServer Broadcast Quality",
-      "uid": "mist-bq",
-      "tags": ["mistserver","broadcast"],
-      "timezone": "browser",
-      "refresh": "10s",
-      "schemaVersion": 36,
-      "panels": [
-        {"id":1,"type":"timeseries","title":"Stream Up/Down",
-         "gridPos":{"x":0,"y":0,"w":12,"h":6},
-         "targets":[{"expr":"mist_stream_up","legendFormat":"{{stream}}"}],
-         "fieldConfig":{"defaults":{"min":0,"max":1,"thresholds":{"steps":[{"color":"red","value":0},{"color":"green","value":1}]}}}},
-        {"id":2,"type":"timeseries","title":"Bitrate (kbits/s)",
-         "gridPos":{"x":12,"y":0,"w":12,"h":6},
-         "targets":[{"expr":"mist_stream_bitrate_kbits","legendFormat":"{{stream}} {{track}}"}]},
-        {"id":3,"type":"timeseries","title":"Stream FPS",
-         "gridPos":{"x":0,"y":6,"w":12,"h":8},
-         "targets":[{"expr":"mist_stream_fps","legendFormat":"{{stream}}"}]},
-        {"id":4,"type":"timeseries","title":"Stream Jitter (ms)",
-         "gridPos":{"x":12,"y":6,"w":12,"h":8},
-         "targets":[{"expr":"mist_stream_jitter_ms","legendFormat":"{{stream}}"}],
-         "fieldConfig":{"defaults":{"thresholds":{"steps":[{"color":"green","value":0},{"color":"yellow","value":50},{"color":"red","value":200}]}}}},
-        {"id":5,"type":"stat","title":"Active Operator Sessions",
-         "gridPos":{"x":0,"y":14,"w":6,"h":4},
-         "targets":[{"expr":"sum by (stream) (mist_operator_sessions_total{direction=\"output\"})","legendFormat":"{{stream}}"}],
-         "fieldConfig":{"defaults":{"thresholds":{"steps":[{"color":"green","value":0}]}}}},
-        {"id":6,"type":"stat","title":"SRT Packet Loss %",
-         "gridPos":{"x":6,"y":14,"w":6,"h":4},
-         "targets":[{"expr":"rate(mist_packets{pkttype=\"lost\"}[5m])/rate(mist_packets{pkttype=\"sent\"}[5m])*100","legendFormat":"{{stream}} loss%"}],
-         "fieldConfig":{"defaults":{"unit":"percent","thresholds":{"steps":[{"color":"green","value":0},{"color":"yellow","value":0.5},{"color":"red","value":2}]}}}},
-        {"id":7,"type":"stat","title":"Active Viewer Sessions",
-         "gridPos":{"x":12,"y":14,"w":6,"h":4},
-         "targets":[{"expr":"mist_sessions_total{sessType=\"outgoing\"}","legendFormat":"outgoing"}]},
-        {"id":8,"type":"stat","title":"Active Ingest Sessions",
-         "gridPos":{"x":18,"y":14,"w":6,"h":4},
-         "targets":[{"expr":"mist_sessions_total{sessType=\"incoming\"}","legendFormat":"incoming"}]}
-      ]
-    },
-    "overwrite": true,
-    "folderId": 0
-  }' | jq -r '"Broadcast Quality dashboard: \(.importedUrl)"' \
-  || echo "==> Broadcast quality dashboard import failed"
+  -d @"${DASH_FILE}" \
+  | jq -r '"Session status dashboard: \(.importedUrl)"' \
+  || echo "==> Session status dashboard import failed"
+rm -f "${DASH_FILE}"
 
 echo "==> Monitoring server setup complete"
 echo "==> Grafana: http://$(curl -sf https://ipinfo.io/ip):3000"

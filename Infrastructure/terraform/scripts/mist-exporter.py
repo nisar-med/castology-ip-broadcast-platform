@@ -2,12 +2,14 @@
 """
 MistServer API Prometheus Exporter.
 
-Polls MistServer /api2 for active operator sessions and stream health.
-Also polls local filesystem + systemctl for R2 HLS pipeline health.
+Polls MistServer /api for active sessions and stream health.
+Polls PocketBase for broadcaster/operator config and checks expected
+sessions are connected. Flags unregistered sessions.
 Exposes metrics on port 9101 for Prometheus to scrape.
 """
 
 import json
+import ipaddress
 import os
 import subprocess
 import threading
@@ -28,23 +30,32 @@ log = logging.getLogger(__name__)
 
 _raw_streams = os.environ.get("STREAMS_JSON", "")
 STREAMS = json.loads(_raw_streams) if _raw_streams else [
-    {"name": "geo+ent",  "port": 1238},
-    {"name": "geo+news", "port": 1236},
+    {"name": "geo+ent"},
+    {"name": "geo+news"},
 ]
 STREAM_NAMES = [s["name"] for s in STREAMS]
 
-METRICS_PORT     = int(os.environ.get("EXPORTER_PORT", "9101"))
-MIST_API_PORT    = os.environ.get("MIST_API_PORT", "4242")
-MIST_API_URL     = f"http://127.0.0.1:{MIST_API_PORT}/api2"
+METRICS_PORT      = int(os.environ.get("EXPORTER_PORT", "9101"))
+MIST_API_PORT     = os.environ.get("MIST_API_PORT", "4242")
+MIST_API_URL      = f"http://127.0.0.1:{MIST_API_PORT}/api"
+PB_URL            = os.environ.get("PB_URL", "http://127.0.0.1:8090")
+PB_EMAIL          = os.environ.get("PB_EMAIL", "admin@castology.tv")
+PB_PASS           = os.environ.get("PB_PASS", "")
+
 SESSION_POLL_SECS = 10
+HEALTH_POLL_SECS  = 60
 R2_POLL_SECS      = 5
 HLS_BASE_DIR      = "/var/lib/mist-hls"
+CLIENTS_LOOKBACK_SECS = int(os.environ.get("CLIENTS_LOOKBACK_SECS", "3"))
+
+# Packet loss alert threshold — alert if lost/sent > this over the scrape window
+PACKET_LOSS_THRESHOLD = 0.02  # 2%
 
 # ── Prometheus metrics ────────────────────────────────────────────────────────
 
 registry = CollectorRegistry()
 
-# Operator sessions (from /api2?clients)
+# Active sessions (from POST /api {"clients": null})
 operator_sessions = Gauge(
     "mist_operator_sessions_total",
     "Active operator sessions per stream, direction and connector",
@@ -63,12 +74,42 @@ session_uptime = Gauge(
     ["stream", "ip", "connector"],
     registry=registry,
 )
+session_pkt_loss = Gauge(
+    "mist_session_packet_loss_ratio",
+    "Packet loss ratio (lost/sent) for active SRT session",
+    ["stream", "ip", "direction"],
+    registry=registry,
+)
 
 # Stream health
 stream_up = Gauge(
     "mist_stream_up",
     "1 if stream is online in MistServer",
     ["stream"],
+    registry=registry,
+)
+
+# Health checks against PocketBase config
+# One series per configured entity×stream. ip=connected IP or "none" when offline.
+connection_status = Gauge(
+    "mist_connection_status",
+    "1 if connected, 0 if offline. name=broadcaster or group, role=broadcaster|operator, ip=connected IP or none",
+    ["name", "stream", "role", "ip"],
+    registry=registry,
+)
+
+# Pre-joined table metrics — all share {name, stream, ip} so Grafana merge works cleanly
+ingest_status   = Gauge("mist_ingest_status",    "Ingest connection: 1=online 0=offline", ["name", "stream", "ip"], registry=registry)
+ingest_jitter   = Gauge("mist_ingest_jitter_ms", "Ingest stream jitter in ms",            ["name", "stream", "ip"], registry=registry)
+ingest_loss     = Gauge("mist_ingest_loss",      "Ingest packet loss ratio",              ["name", "stream", "ip"], registry=registry)
+playout_status  = Gauge("mist_playout_status",   "Playout connection: 1=online 0=offline",["name", "stream", "ip"], registry=registry)
+playout_loss    = Gauge("mist_playout_loss",     "Playout packet loss ratio",             ["name", "stream", "ip"], registry=registry)
+playout_bytes   = Gauge("mist_playout_bytes",    "Playout bytes transferred",             ["name", "stream", "ip"], registry=registry)
+playout_uptime  = Gauge("mist_playout_uptime_seconds", "Playout session uptime seconds",  ["name", "stream", "ip"], registry=registry)
+session_unregistered = Gauge(
+    "mist_session_unregistered",
+    "1 if an active session has no matching token in PocketBase",
+    ["stream", "ip", "direction", "connector"],
     registry=registry,
 )
 
@@ -109,20 +150,100 @@ for _s in STREAM_NAMES:
         for _c in ("TSSRT", "HLS", "HTTP", "unknown"):
             operator_sessions.labels(stream=_s, direction=_d, connector=_c).set(0)
 
+# ── PocketBase config cache (refreshed every HEALTH_POLL_SECS) ───────────────
+
+_pb_lock = threading.Lock()
+_pb_config = {
+    "broadcasters": [],   # [{"name", "streams": [...], "token_key", "allowed_ips"}]
+    "groups": [],         # [{"name", "token_key", "channels": [...], "allowed_ips"}]
+    "tokens": set(),      # all valid token_keys
+}
+
+def _pb_auth() -> str:
+    data = json.dumps({"identity": PB_EMAIL, "password": PB_PASS}).encode()
+    req = urllib.request.Request(
+        f"{PB_URL}/api/collections/_superusers/auth-with-password",
+        data=data, headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        return json.loads(resp.read())["token"]
+
+def _pb_fetch(token: str, collection: str) -> list:
+    req = urllib.request.Request(
+        f"{PB_URL}/api/collections/{collection}/records?perPage=200",
+        headers={"Authorization": token}
+    )
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        return json.loads(resp.read()).get("items", [])
+
+def poll_pb_config():
+    while True:
+        try:
+            token = _pb_auth()
+            broadcasters = _pb_fetch(token, "broadcasters")
+            affiliates = _pb_fetch(token, "affiliates")
+
+            parsed_broadcasters = []
+            for b in broadcasters:
+                if not b.get("active", True):
+                    continue
+                streams = b.get("streams", [])
+                if isinstance(streams, str):
+                    streams = json.loads(streams)
+                parsed_broadcasters.append({
+                    "name":       b.get("name", "unknown"),
+                    "token_key":  b.get("token_key", ""),
+                    "streams":    streams,
+                    "allowed_ips": b.get("allowed_ips", ""),
+                })
+
+            parsed_groups = []
+            tokens = set()
+            for g in affiliates:
+                if not g.get("active", True):
+                    continue
+                streams = g.get("streams", [])
+                if isinstance(streams, str):
+                    streams = json.loads(streams)
+                tk = g.get("token_key", "")
+                parsed_groups.append({
+                    "name":       g.get("name", "unknown"),
+                    "token_key":  tk,
+                    "streams":    streams,
+                    "allowed_ips": g.get("allowed_ips", ""),
+                })
+                if tk:
+                    tokens.add(tk)
+
+            for b in parsed_broadcasters:
+                if b["token_key"]:
+                    tokens.add(b["token_key"])
+
+            with _pb_lock:
+                _pb_config["broadcasters"] = parsed_broadcasters
+                _pb_config["groups"] = parsed_groups
+                _pb_config["tokens"] = tokens
+
+            log.info("PocketBase config refreshed: %d broadcasters, %d groups, %d tokens",
+                     len(parsed_broadcasters), len(parsed_groups), len(tokens))
+        except Exception as e:
+            log.warning("PocketBase config poll error: %s", e)
+
+        time.sleep(HEALTH_POLL_SECS)
+
+
 # ── MistServer API helpers ────────────────────────────────────────────────────
 
-def mist_get(query_param: str) -> dict:
-    url = f"{MIST_API_URL}?{query_param}"
-    with urllib.request.urlopen(url, timeout=5) as resp:
-        return json.loads(resp.read())
-
 def mist_post(payload: dict) -> dict:
-    MIST_API_V1 = f"http://127.0.0.1:{MIST_API_PORT}/api"
     data = json.dumps(payload).encode()
-    req = urllib.request.Request(MIST_API_V1, data=data,
+    req = urllib.request.Request(MIST_API_URL, data=data,
                                   headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=5) as resp:
         return json.loads(resp.read())
+
+
+def _clients_request() -> dict:
+    return {"clients": {"time": -CLIENTS_LOOKBACK_SECS}}
 
 
 # ── Session + stream health poller ───────────────────────────────────────────
@@ -137,68 +258,189 @@ def poll_sessions_and_streams():
             _poll_active_streams()
         except Exception as e:
             log.warning("active_streams poll error: %s", e)
+        try:
+            _check_health()
+        except Exception as e:
+            log.warning("health check error: %s", e)
         time.sleep(SESSION_POLL_SECS)
 
 
 def _poll_clients():
-    # POST /api {"clients": null} returns:
+    # POST /api {"clients": null} →
     # {"clients": {"fields": ["host","stream","protocol","conntime","position",
     #                         "down","up","downbps","upbps","sessid",
-    #                         "pktcount","pktlost","pktretransmit"],
-    #              "data": [[...], ...]}}
-    data = mist_post({"clients": None})
+    #                         "pktcount","pktlost","pktretransmit"], "data": [...]}}
+    data = mist_post(_clients_request())
     clients_block = data.get("clients", {})
     fields = clients_block.get("fields", [])
     rows   = clients_block.get("data", [])
 
     if not fields:
+        session_bytes.clear()
+        session_uptime.clear()
+        session_pkt_loss.clear()
+        session_unregistered.clear()
         return
 
     fi = {f: i for i, f in enumerate(fields)}
 
-    # Clear old per-session gauges before repopulating
     session_bytes.clear()
     session_uptime.clear()
+    session_pkt_loss.clear()
+    session_unregistered.clear()
 
     counts: dict[tuple[str, str, str], int] = {}
+
+    with _pb_lock:
+        known_tokens = set(_pb_config["tokens"])
 
     for row in rows:
         if not isinstance(row, list) or len(row) < len(fields):
             continue
 
         stream    = row[fi["stream"]]
-        if stream not in STREAM_NAMES:
-            continue
+        protocol  = row[fi["protocol"]]              # e.g. "OUTPUT:TSSRT"
+        direction, connector = _parse_protocol(protocol)
 
-        protocol  = row[fi["protocol"]]          # e.g. "OUTPUT:TSSRT"
-        direction, _, connector = protocol.partition(":")
-        direction  = direction.lower()            # "input" / "output"
-        connector  = connector or "unknown"       # "TSSRT" / "HLS" / "HTTP"
-
-        ip         = row[fi["host"]]
+        ip = row[fi["host"]]
         ip = ip.replace("::ffff:", "").strip("[]").split(":")[0] if "::ffff:" in ip or ip.startswith("[") else ip
 
-        conntime   = row[fi["conntime"]]          # seconds
+        conntime   = row[fi["conntime"]]
         down_bytes = row[fi["down"]]
         up_bytes   = row[fi["up"]]
-        bytes_val  = down_bytes + up_bytes
+        pkt_count  = row[fi["pktcount"]]
+        pkt_lost   = row[fi["pktlost"]]
 
+        # Session metrics (all streams, not just configured ones)
         key = (stream, direction, connector)
         counts[key] = counts.get(key, 0) + 1
-        session_bytes.labels(stream=stream, ip=ip, direction=direction, connector=connector).set(bytes_val)
+        session_bytes.labels(stream=stream, ip=ip, direction=direction, connector=connector).set(down_bytes + up_bytes)
         session_uptime.labels(stream=stream, ip=ip, connector=connector).set(conntime)
 
-    # Reset all known combos to 0, then set actuals
+        if pkt_count > 0:
+            loss_ratio = pkt_lost / pkt_count
+            session_pkt_loss.labels(stream=stream, ip=ip, direction=direction).set(loss_ratio)
+            if loss_ratio > PACKET_LOSS_THRESHOLD:
+                log.warning("HIGH PACKET LOSS: stream=%s ip=%s direction=%s loss=%.1f%%",
+                            stream, ip, direction, loss_ratio * 100)
+
+        # Unregistered session detection — sessid starts with I/O + token
+        sessid = row[fi["sessid"]] if "sessid" in fi else ""
+        # sessid format: "O<token_hash>..." — we can't reverse the token from hash,
+        # so flag any output session on a known stream where IP isn't in any group
+        is_registered = _is_registered(ip, stream, direction, known_tokens, sessid)
+        session_unregistered.labels(stream=stream, ip=ip, direction=direction, connector=connector).set(
+            0 if is_registered else 1
+        )
+        if not is_registered:
+            log.warning("UNREGISTERED SESSION: stream=%s ip=%s direction=%s connector=%s",
+                        stream, ip, direction, connector)
+
+    # Update aggregate counts for configured streams
     for name in STREAM_NAMES:
-        for direction in ("input", "output", "unknown"):
-            for connector in ("TSSRT", "HLS", "HTTP", "unknown"):
-                operator_sessions.labels(stream=name, direction=direction, connector=connector).set(
-                    counts.get((name, direction, connector), 0)
+        for d in ("input", "output", "unknown"):
+            for c in ("TSSRT", "HLS", "HTTP", "unknown"):
+                operator_sessions.labels(stream=name, direction=d, connector=c).set(
+                    counts.get((name, d, c), 0)
                 )
 
 
+def _allowed_ips(raw: str) -> list[str]:
+    return [x.strip() for x in raw.split(",") if x.strip()]
+
+
+def _is_loopback_ip(ip: str) -> bool:
+    try:
+        return ipaddress.ip_address(ip).is_loopback
+    except ValueError:
+        return False
+
+
+def _parse_protocol(protocol: str) -> tuple[str, str]:
+    direction, _, connector = protocol.partition(":")
+    direction = direction.lower() or "unknown"
+    connector = connector or "unknown"
+    return direction, connector
+
+
+def _ip_allowed(ip: str, allowed: list[str]) -> bool:
+    if not allowed:
+        return True
+
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+
+    for entry in allowed:
+        try:
+            if addr in ipaddress.ip_network(entry, strict=False):
+                return True
+        except ValueError:
+            if ip == entry:
+                return True
+
+    return False
+
+
+def _assign_connected_ips(entities, connected_ips: set[str]):
+    remaining = set(connected_ips)
+    assignments = []
+    explicit = []
+    wildcard = []
+
+    for entity in entities:
+        allowed = _allowed_ips(entity["allowed_ips"])
+        if allowed:
+            explicit.append((entity, allowed))
+        else:
+            wildcard.append(entity)
+
+    for entity, allowed in explicit:
+        match = None
+        for entry in allowed:
+            candidates = sorted(ip for ip in remaining if _ip_allowed(ip, [entry]))
+            if candidates:
+                match = candidates[0]
+                break
+        if match is None:
+            match = next((ip for ip in sorted(remaining) if _ip_allowed(ip, allowed)), None)
+        assignments.append((entity, match))
+        if match is not None:
+            remaining.remove(match)
+
+    for entity in wildcard:
+        match = sorted(remaining)[0] if remaining else None
+        assignments.append((entity, match))
+        if match is not None:
+            remaining.remove(match)
+
+    return assignments
+
+
+def _is_registered(ip: str, stream: str, direction: str, known_tokens: set, sessid: str) -> bool:
+    with _pb_lock:
+        broadcasters = _pb_config["broadcasters"]
+        groups = _pb_config["groups"]
+
+    # Input sessions — check broadcaster allowed_ips
+    if direction == "input":
+        for b in broadcasters:
+            if stream in b["streams"]:
+                if _ip_allowed(ip, _allowed_ips(b["allowed_ips"])):
+                    return True
+        return False
+
+    # Output sessions — check operator group allowed_ips
+    for g in groups:
+        if stream in g["streams"]:
+            if _ip_allowed(ip, _allowed_ips(g["allowed_ips"])):
+                return True
+
+    return False
+
+
 def _poll_active_streams():
-    # POST /api {"active_streams": null} returns a list of online stream names
     data = mist_post({"active_streams": None})
     active = data.get("active_streams", [])
     if isinstance(active, dict):
@@ -206,6 +448,123 @@ def _poll_active_streams():
 
     for name in STREAM_NAMES:
         stream_up.labels(stream=name).set(1 if name in active else 0)
+
+
+def _check_health():
+    """Cross-reference live sessions against PocketBase config."""
+    data = mist_post({"clients": {"time": -CLIENTS_LOOKBACK_SECS}, "active_streams": None})
+    clients_block = data.get("clients", {})
+    fields = clients_block.get("fields", [])
+    rows   = clients_block.get("data", [])
+    active_streams = data.get("active_streams", [])
+    if isinstance(active_streams, dict):
+        active_streams = list(active_streams.keys())
+
+    fi = {f: i for i, f in enumerate(fields)} if fields else {}
+
+    # Build sets of what's actually connected
+    active_inputs: dict[str, set] = {}   # stream → set of IPs pushing in
+    active_outputs: dict[str, set] = {}  # stream → set of IPs pulling out
+
+    for row in rows:
+        if not isinstance(row, list) or not fi:
+            continue
+        stream   = row[fi["stream"]]
+        protocol = row[fi["protocol"]]
+        direction, connector = _parse_protocol(protocol)
+        ip = row[fi["host"]]
+        ip = ip.replace("::ffff:", "").strip("[]").split(":")[0] if "::ffff:" in ip or ip.startswith("[") else ip
+        if direction == "input":
+            active_inputs.setdefault(stream, set()).add(ip)
+        elif not _is_loopback_ip(ip):
+            active_outputs.setdefault(stream, set()).add(ip)
+        elif connector in ("HTTP", "HLS", "unknown"):
+            log.info("Ignoring loopback playout session: stream=%s ip=%s connector=%s", stream, ip, connector)
+
+    with _pb_lock:
+        broadcasters = list(_pb_config["broadcasters"])
+        groups = list(_pb_config["groups"])
+
+    connection_status.clear()
+    ingest_status.clear()
+    ingest_jitter.clear()
+    ingest_loss.clear()
+    playout_status.clear()
+    playout_loss.clear()
+    playout_bytes.clear()
+    playout_uptime.clear()
+
+    # Build per-IP session data maps for joining
+    # stream → jitter (from active_streams data — polled separately, use cached value)
+    # ip → {pkt_loss, bytes, uptime} from active sessions
+    input_loss:   dict[tuple[str, str], float] = {}   # (stream, ip) → loss ratio
+    output_loss:  dict[tuple[str, str], float] = {}   # (stream, ip) → loss ratio
+    output_bytes: dict[tuple[str, str], float] = {}   # (stream, ip) → bytes
+    output_uptime: dict[tuple[str, str], float] = {}  # (stream, ip) → uptime seconds
+    stream_jitter: dict[str, float] = {}  # stream → jitter ms
+
+    for row in rows:
+        if not isinstance(row, list) or not fi:
+            continue
+        stream   = row[fi["stream"]]
+        protocol = row[fi["protocol"]]
+        direction, _ = _parse_protocol(protocol)
+        ip = row[fi["host"]]
+        ip = ip.replace("::ffff:", "").strip("[]").split(":")[0] if "::ffff:" in ip or ip.startswith("[") else ip
+        pkt_count = row[fi["pktcount"]]
+        pkt_lost  = row[fi["pktlost"]]
+        loss = pkt_lost / pkt_count if pkt_count > 0 else 0.0
+        session_key = (stream, ip)
+        if direction == "input":
+            input_loss[session_key] = loss
+        elif not _is_loopback_ip(ip):
+            output_loss[session_key] = loss
+            output_bytes[session_key] = row[fi["down"]] + row[fi["up"]]
+            output_uptime[session_key] = row[fi["conntime"]]
+
+    # Fetch jitter from active_streams info (already polled in active_streams response)
+    try:
+        streams_data = mist_post({"active_streams": None})
+        raw = streams_data.get("active_streams", {})
+        if isinstance(raw, dict):
+            for sname, sinfo in raw.items():
+                if isinstance(sinfo, dict):
+                    stream_jitter[sname] = sinfo.get("jitter", 0)
+    except Exception:
+        pass
+
+    # Check each broadcaster
+    for stream in STREAM_NAMES:
+        stream_broadcasters = [b for b in broadcasters if stream in b["streams"]]
+        for b, ip in _assign_connected_ips(stream_broadcasters, active_inputs.get(stream, set())):
+            if ip is not None:
+                connection_status.labels(name=b["name"], stream=stream, role="broadcaster", ip=ip).set(1)
+                ingest_status.labels(name=b["name"], stream=stream, ip=ip).set(1)
+                ingest_jitter.labels(name=b["name"], stream=stream, ip=ip).set(stream_jitter.get(stream, 0))
+                ingest_loss.labels(name=b["name"], stream=stream, ip=ip).set(input_loss.get((stream, ip), 0))
+            else:
+                connection_status.labels(name=b["name"], stream=stream, role="broadcaster", ip="none").set(0)
+                ingest_status.labels(name=b["name"], stream=stream, ip="none").set(0)
+                ingest_jitter.labels(name=b["name"], stream=stream, ip="none").set(0)
+                ingest_loss.labels(name=b["name"], stream=stream, ip="none").set(0)
+                log.warning("BROADCASTER OFFLINE: broadcaster=%s stream=%s", b["name"], stream)
+
+    # Check each operator group
+    for stream in STREAM_NAMES:
+        stream_groups = [g for g in groups if stream in g["streams"]]
+        for g, ip in _assign_connected_ips(stream_groups, active_outputs.get(stream, set())):
+            if ip is not None:
+                connection_status.labels(name=g["name"], stream=stream, role="operator", ip=ip).set(1)
+                playout_status.labels(name=g["name"], stream=stream, ip=ip).set(1)
+                playout_loss.labels(name=g["name"], stream=stream, ip=ip).set(output_loss.get((stream, ip), 0))
+                playout_bytes.labels(name=g["name"], stream=stream, ip=ip).set(output_bytes.get((stream, ip), 0))
+                playout_uptime.labels(name=g["name"], stream=stream, ip=ip).set(output_uptime.get((stream, ip), 0))
+            else:
+                connection_status.labels(name=g["name"], stream=stream, role="operator", ip="none").set(0)
+                playout_status.labels(name=g["name"], stream=stream, ip="none").set(0)
+                playout_loss.labels(name=g["name"], stream=stream, ip="none").set(0)
+                playout_bytes.labels(name=g["name"], stream=stream, ip="none").set(0)
+                playout_uptime.labels(name=g["name"], stream=stream, ip="none").set(0)
 
 
 # ── R2 pipeline poller ───────────────────────────────────────────────────────
@@ -294,6 +653,15 @@ class MetricsHandler(BaseHTTPRequestHandler):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    if not PB_PASS:
+        log.warning("PB_PASS not set — health checks against PocketBase will fail")
+
+    threading.Thread(target=poll_pb_config, daemon=True, name="pb-config-poller").start()
+    log.info("Started PocketBase config poller (interval %ds)", HEALTH_POLL_SECS)
+
+    # Give PocketBase a moment to load before first session poll
+    time.sleep(2)
+
     threading.Thread(target=poll_sessions_and_streams, daemon=True, name="mist-api-poller").start()
     log.info("Started MistServer API poller (interval %ds)", SESSION_POLL_SECS)
 

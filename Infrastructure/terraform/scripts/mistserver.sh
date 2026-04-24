@@ -7,6 +7,7 @@ SRT_INGEST_PORT="${SRT_INGEST_PORT:-1235}"
 SRT_OUTPUT_PORTS="${SRT_OUTPUT_PORTS:-1236,1238}"   # comma-separated
 MIST_API_PORT="${MIST_API_PORT:-4242}"
 PROMETHEUS_PASSPHRASE="${PROMETHEUS_PASSPHRASE:?PROMETHEUS_PASSPHRASE must be set}"
+MIST_SHM_SIZE="${MIST_SHM_SIZE:-1536M}"
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -23,6 +24,34 @@ if ! command -v MistController &>/dev/null; then
 else
   echo "==> MistServer already installed — skipping"
 fi
+
+echo "==> Configuring shared memory"
+python3 - <<PYEOF
+from pathlib import Path
+
+fstab = Path("/etc/fstab")
+entry = "tmpfs /dev/shm tmpfs defaults,size=${MIST_SHM_SIZE} 0 0"
+lines = fstab.read_text().splitlines() if fstab.exists() else []
+out = []
+replaced = False
+
+for line in lines:
+    stripped = line.strip()
+    if stripped and not stripped.startswith("#"):
+        parts = stripped.split()
+        if len(parts) >= 3 and parts[1] == "/dev/shm" and parts[2] == "tmpfs":
+            out.append(entry)
+            replaced = True
+            continue
+    out.append(line)
+
+if not replaced:
+    out.append(entry)
+
+fstab.write_text("\n".join(out) + "\n")
+PYEOF
+mount -o remount,size="${MIST_SHM_SIZE}" /dev/shm
+df -h /dev/shm
 
 # Configure MistServer — must be done with service stopped to prevent overwrites
 systemctl stop mistserver 2>/dev/null || true
