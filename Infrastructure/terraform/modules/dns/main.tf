@@ -18,8 +18,7 @@ data "cloudflare_zone" "castology_tv" {
 
 locals {
   proxied_records = {
-    play    = { ip = var.streaming_ip,  comment = "MistServer HLS/MPEG-TS player" }
-    onboard = { ip = var.monitoring_ip, comment = "Operator portal (PocketBase)" }
+    play = { ip = var.streaming_ip, comment = "MistServer HLS/MPEG-TS player" }
   }
 
   dns_only_records = {
