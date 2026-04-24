@@ -64,34 +64,10 @@ session_uptime = Gauge(
     registry=registry,
 )
 
-# Stream health (from /api2?active_streams)
+# Stream health
 stream_up = Gauge(
     "mist_stream_up",
     "1 if stream is online in MistServer",
-    ["stream"],
-    registry=registry,
-)
-stream_bitrate = Gauge(
-    "mist_stream_bitrate_kbits",
-    "Per-track bitrate in kbits/s",
-    ["stream", "track"],
-    registry=registry,
-)
-stream_fps = Gauge(
-    "mist_stream_fps",
-    "Video frames per second",
-    ["stream"],
-    registry=registry,
-)
-stream_jitter = Gauge(
-    "mist_stream_jitter_ms",
-    "Stream jitter in milliseconds",
-    ["stream"],
-    registry=registry,
-)
-stream_buffer = Gauge(
-    "mist_stream_buffer_ms",
-    "Stream buffer size in milliseconds",
     ["stream"],
     registry=registry,
 )
@@ -125,9 +101,6 @@ r2_upload_errors = Counter(
 # Initialise labels so metrics appear even before first poll
 for _s in STREAM_NAMES:
     stream_up.labels(stream=_s).set(0)
-    stream_fps.labels(stream=_s).set(0)
-    stream_jitter.labels(stream=_s).set(0)
-    stream_buffer.labels(stream=_s).set(0)
     r2_ffmpeg_up.labels(stream=_s).set(0)
     r2_segment_lag.labels(stream=_s).set(0)
     r2_segment_age.labels(stream=_s).set(0)
@@ -141,6 +114,14 @@ for _s in STREAM_NAMES:
 def mist_get(query_param: str) -> dict:
     url = f"{MIST_API_URL}?{query_param}"
     with urllib.request.urlopen(url, timeout=5) as resp:
+        return json.loads(resp.read())
+
+def mist_post(payload: dict) -> dict:
+    MIST_API_V1 = f"http://127.0.0.1:{MIST_API_PORT}/api"
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(MIST_API_V1, data=data,
+                                  headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=5) as resp:
         return json.loads(resp.read())
 
 
@@ -160,9 +141,20 @@ def poll_sessions_and_streams():
 
 
 def _poll_clients():
-    data = mist_get("clients")
-    # Response: {"streams": {"geo+news": {"clients": [...]}}}
-    streams_data = data.get("streams", {})
+    # POST /api {"clients": null} returns:
+    # {"clients": {"fields": ["host","stream","protocol","conntime","position",
+    #                         "down","up","downbps","upbps","sessid",
+    #                         "pktcount","pktlost","pktretransmit"],
+    #              "data": [[...], ...]}}
+    data = mist_post({"clients": None})
+    clients_block = data.get("clients", {})
+    fields = clients_block.get("fields", [])
+    rows   = clients_block.get("data", [])
+
+    if not fields:
+        return
+
+    fi = {f: i for i, f in enumerate(fields)}
 
     # Clear old per-session gauges before repopulating
     session_bytes.clear()
@@ -170,25 +162,31 @@ def _poll_clients():
 
     counts: dict[tuple[str, str, str], int] = {}
 
-    for stream_name, stream_info in streams_data.items():
-        if stream_name not in STREAM_NAMES:
+    for row in rows:
+        if not isinstance(row, list) or len(row) < len(fields):
             continue
-        clients = stream_info.get("clients", [])
-        for client in clients:
-            if not isinstance(client, dict):
-                continue
-            direction  = client.get("direction", "unknown")
-            connector  = client.get("connector", "unknown")
-            ip = client.get("ip", "unknown")
-            # Strip IPv6-mapped prefix
-            ip = ip.replace("::ffff:", "").strip("[]").split(":")[0] if "::ffff:" in ip or ip.startswith("[") else ip
-            bytes_val  = client.get("bytes", 0)
-            uptime_ms  = client.get("ms", 0)
 
-            key = (stream_name, direction, connector)
-            counts[key] = counts.get(key, 0) + 1
-            session_bytes.labels(stream=stream_name, ip=ip, direction=direction, connector=connector).set(bytes_val)
-            session_uptime.labels(stream=stream_name, ip=ip, connector=connector).set(uptime_ms / 1000.0)
+        stream    = row[fi["stream"]]
+        if stream not in STREAM_NAMES:
+            continue
+
+        protocol  = row[fi["protocol"]]          # e.g. "OUTPUT:TSSRT"
+        direction, _, connector = protocol.partition(":")
+        direction  = direction.lower()            # "input" / "output"
+        connector  = connector or "unknown"       # "TSSRT" / "HLS" / "HTTP"
+
+        ip         = row[fi["host"]]
+        ip = ip.replace("::ffff:", "").strip("[]").split(":")[0] if "::ffff:" in ip or ip.startswith("[") else ip
+
+        conntime   = row[fi["conntime"]]          # seconds
+        down_bytes = row[fi["down"]]
+        up_bytes   = row[fi["up"]]
+        bytes_val  = down_bytes + up_bytes
+
+        key = (stream, direction, connector)
+        counts[key] = counts.get(key, 0) + 1
+        session_bytes.labels(stream=stream, ip=ip, direction=direction, connector=connector).set(bytes_val)
+        session_uptime.labels(stream=stream, ip=ip, connector=connector).set(conntime)
 
     # Reset all known combos to 0, then set actuals
     for name in STREAM_NAMES:
@@ -200,32 +198,14 @@ def _poll_clients():
 
 
 def _poll_active_streams():
-    data = mist_get("active_streams")
-    active = data.get("active_streams", {})
+    # POST /api {"active_streams": null} returns a list of online stream names
+    data = mist_post({"active_streams": None})
+    active = data.get("active_streams", [])
+    if isinstance(active, dict):
+        active = list(active.keys())
 
     for name in STREAM_NAMES:
-        if name not in active:
-            stream_up.labels(stream=name).set(0)
-            stream_fps.labels(stream=name).set(0)
-            stream_jitter.labels(stream=name).set(0)
-            stream_buffer.labels(stream=name).set(0)
-            continue
-
-        stream_up.labels(stream=name).set(1)
-        info = active[name]
-
-        # Per-track bitrate
-        tracks = info.get("tracks", {})
-        for track_id, track in tracks.items():
-            codec = track.get("codec", track_id)
-            bps = track.get("bps", 0)
-            stream_bitrate.labels(stream=name, track=codec).set(bps / 1000.0)
-            if track.get("type") == "video":
-                fps = track.get("fpks", 0) / 1000.0
-                stream_fps.labels(stream=name).set(fps)
-
-        stream_jitter.labels(stream=name).set(info.get("jitter", 0))
-        stream_buffer.labels(stream=name).set(info.get("buffer", 0))
+        stream_up.labels(stream=name).set(1 if name in active else 0)
 
 
 # ── R2 pipeline poller ───────────────────────────────────────────────────────
