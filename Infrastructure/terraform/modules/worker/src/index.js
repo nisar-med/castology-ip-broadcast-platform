@@ -3,14 +3,13 @@
  *
  * Routes:
  *   GET /health                        — public health check
- *   GET /playlist?token=              — M3U channel list for all broadcaster channels
+ *   GET /playlist?token=              — M3U stream list for the affiliate
  *   GET /live/{stream}/index.m3u8     — HLS playlist from R2 (auth required)
  *   GET /live/{stream}/*.ts           — HLS segments from R2 (auth required)
  *
-
  * Auth: Bearer token in Authorization header or ?token= query param.
  *
- * KV format: token → JSON { broadcaster, channels: [{name, stream}] }
+ * KV format: token → JSON { affiliate, streams: ["geo+news", "geo+ent"] }
  *
  * Caching:
  *   Playlists — Cache API keyed on token-free URL, TTL=6s.
@@ -23,7 +22,7 @@ const CACHE_TTL_SEGMENT  = 3600;
 const TOKEN_CACHE_TTL_MS = 60_000;
 const PLACEHOLDER        = "STREAM_TOKEN";
 
-// Isolate-scoped token cache: token → { broadcaster, channels, expiresAt }
+// Isolate-scoped token cache: token → { affiliate, streams, expiresAt }
 const tokenCache = new Map();
 
 async function resolveToken(token, env) {
@@ -36,7 +35,7 @@ async function resolveToken(token, env) {
 
   try {
     const data = JSON.parse(raw);
-    const entry = { broadcaster: data.broadcaster, channels: data.channels, expiresAt: now + TOKEN_CACHE_TTL_MS };
+    const entry = { affiliate: data.affiliate, streams: data.streams, expiresAt: now + TOKEN_CACHE_TTL_MS };
     tokenCache.set(token, entry);
     return entry;
   } catch {
@@ -64,13 +63,13 @@ export default {
     const operator = await resolveToken(token, env);
     if (!operator) return unauthorized("Invalid token");
 
-    // --- M3U channel list ---
+    // --- M3U stream list ---
     if (url.pathname === "/playlist") {
       const baseUrl = `https://${url.host}`;
       const lines = ["#EXTM3U"];
-      for (const ch of operator.channels) {
-        lines.push(`#EXTINF:-1 tvg-name="${ch.name}",${ch.name}`);
-        lines.push(`${baseUrl}/live/${ch.stream}/index.m3u8?token=${token}`);
+      for (const stream of operator.streams) {
+        lines.push(`#EXTINF:-1 tvg-name="${stream}",${stream}`);
+        lines.push(`${baseUrl}/live/${stream}/index.m3u8?token=${token}`);
       }
       return new Response(lines.join("\n") + "\n", {
         headers: {
@@ -85,10 +84,9 @@ export default {
       return new Response("Not found", { status: 404 });
     }
 
-    // Broadcaster auth — stream name must start with broadcaster id
+    // Affiliate auth — stream must be in the licensed streams list
     const streamName = url.pathname.split("/")[2] ?? "";
-    const broadcaster = streamName.split("+")[0];
-    if (!broadcaster || broadcaster !== operator.broadcaster) {
+    if (!streamName || !operator.streams.includes(streamName)) {
       return unauthorized("Token not authorized for this stream");
     }
 

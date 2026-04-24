@@ -23,7 +23,7 @@ locals {
 
   dns_only_records = {
     ingest = { ip = var.streaming_ip, comment = "SRT ingest for broadcasters (UDP ${var.srt_ingest_port})" }
-    stream = { ip = var.streaming_ip, comment = "SRT output for cable operators (UDP ${join("/", [for p in var.srt_output_ports : tostring(p)])})" }
+    stream = { ip = var.streaming_ip, comment = "SRT output for affiliates (UDP ${join("/", [for p in var.srt_output_ports : tostring(p)])})" }
   }
 }
 

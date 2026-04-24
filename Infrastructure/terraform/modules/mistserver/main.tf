@@ -67,7 +67,7 @@ resource "null_resource" "provision_exporter" {
 
   # Write env file directly — avoids shell quoting issues with JSON
   provisioner "file" {
-    content     = "STREAMS_JSON=${local.streams_json}\nEXPORTER_PORT=${var.exporter_port}\nMIST_API_PORT=${var.api_port}\n"
+    content     = "STREAMS_JSON=${local.streams_json}\nEXPORTER_PORT=${var.exporter_port}\nMIST_API_PORT=${var.api_port}\nPB_URL=http://127.0.0.1:8090\nPB_EMAIL=${var.pb_email}\nPB_PASS=${var.pb_password}\n"
     destination = "/etc/mist-exporter.env"
   }
 

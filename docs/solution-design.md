@@ -1,7 +1,7 @@
 # Castology IP Broadcast Platform — Solution Design
 
-**Version:** 1.1  
-**Date:** 2026-04-23  
+**Version:** 1.2  
+**Date:** 2026-04-24  
 **Status:** Production
 
 ---
@@ -11,7 +11,7 @@
 The Castology IP Broadcast Platform ingests live video over SRT, transcodes/packages it as HLS, stores segments in Cloudflare R2, and delivers them to authenticated viewers via a Cloudflare Worker. A Prometheus/Grafana stack monitors stream health end-to-end.
 
 ```
-Encoder (OBS/vMix)                      Cable Operator STB/IRD
+Encoder (OBS/vMix)                      Affiliate STB/IRD/Player
        │ SRT push                               │
        ▼                                        │ SRT pull  srt://stream.castology.tv:1234
  ┌─────────────┐      HLS pull (localhost)      │   streamid=geo+news/TOKEN
@@ -74,7 +74,7 @@ Both roles currently share one VPS. The Terraform `vps` map supports different I
 |---|---|
 | `mistserver` | MistServer install + config; TSduck exporter; SRT auth script + env file |
 | `monitoring` | Prometheus, Grafana, node-exporter |
-| `pocketbase` | PocketBase operator portal |
+| `pocketbase` | PocketBase + collections setup |
 | `nginx` | Reverse proxy; per-unique-IP deduplication; stream.castology.tv HLS bypass origin |
 | `firewall` | UFW rules; ports merged across VPS roles |
 | `dns` | Cloudflare DNS A records + SRT SRV records |
@@ -162,14 +162,14 @@ This prevents unbounded segment accumulation in R2. `index.m3u8` is excluded fro
 
 ---
 
-## 5. Cable Operator Auth
+## 5. Affiliate Auth
 
 ### 5.1 Authentication Model
 
-Cable operators are authenticated on every new session via the MistServer `PLAY_REWRITE` trigger. Two factors are required:
+Affiliates (cable operators, streaming services) are authenticated on every new session via the MistServer `PLAY_REWRITE` trigger. Two factors are required:
 
-1. **Token** — a unique `token_key` assigned to each operator's `channel_group` in PocketBase
-2. **IP** — source IP must match the `allowed_ips` list on the `channel_group` (comma-separated IPs or CIDRs)
+1. **Token** — a unique `token_key` assigned to each affiliate in PocketBase
+2. **IP** — source IP must match the `allowed_ips` list on the affiliate record (comma-separated IPs or CIDRs); empty `allowed_ips` allows any IP
 
 Both SRT and HLS connections use the same trigger script and the same PocketBase data.
 
@@ -181,11 +181,10 @@ MistServer calls `/opt/mist-scripts/mist-srt-auth.sh` for every new session. The
 2. For **TSSRT**: parses token from streamid (`geo+news/TOKEN`)
 3. For **HLS**: parses token from `?token=` in request URL; `?tkn=` sub-requests pass through (MistServer session token, already authenticated)
 4. Authenticates with PocketBase superadmin API
-5. Looks up `channel_group` by `token_key`
-6. Checks requested stream is in the group's `channels`
-7. Checks source IP against group's `allowed_ips`
-8. Checks an active `cable_operator` record exists for the group
-9. Returns the real stream name on success (e.g. `geo+news`), exits 1 on denial
+5. Looks up `affiliate` by `token_key`
+6. Checks requested stream is in the affiliate's `streams` array
+7. Checks source IP against affiliate's `allowed_ips` (skipped if empty)
+8. Returns the real stream name on success (e.g. `geo+news`), exits 1 on denial
 
 Logs to systemd journal as `mist-srt-auth`. Monitor with:
 ```bash
@@ -194,9 +193,9 @@ journalctl -t mist-srt-auth -f
 
 Credentials are stored in `/etc/mist-auth.env` (chmod 600), not in the script.
 
-### 5.3 SRT Output — Cable Operator Pull
+### 5.3 SRT Output — Affiliate Pull
 
-Port 1234 is configured as TSSRT `acceptable:1` (accepts inbound caller connections). Operators connect with:
+Port 1234 is configured as TSSRT `acceptable:1` (accepts inbound caller connections). Affiliates connect with:
 
 ```
 srt://stream.castology.tv:1234?streamid=geo+news/TOKEN&latency=1000
@@ -204,9 +203,9 @@ srt://stream.castology.tv:1234?streamid=geo+news/TOKEN&latency=1000
 
 MistServer fires PLAY_REWRITE, the script validates token+IP, returns `geo+news` if valid. MistServer delivers the stream from its internal `geo+news` source.
 
-### 5.4 HLS Output — Cable Operator Pull
+### 5.4 HLS Output — Affiliate Pull
 
-Operators can also pull HLS directly from MistServer:
+Affiliates can also pull HLS directly from MistServer:
 
 ```
 https://play.castology.tv/hls/geo+news/index.m3u8?token=TOKEN
@@ -220,34 +219,34 @@ The Cloudflare Worker route `play.castology.tv/hls/*` has **no Worker assigned**
 
 | Collection | Key fields | Purpose |
 |---|---|---|
-| `channel_groups` | `token_key`, `channels` (JSON), `allowed_ips`, `active` | One per operator group; holds token and allowed streams/IPs |
-| `cable_operators` | `company_name`, `group_id`, `active`, `email` | One per operator company; linked to a channel_group |
+| `broadcasters` | `name`, `token_key`, `streams` (JSON array), `allowed_ips`, `active` | One per broadcaster; ingest side — companies pushing SRT into MistServer |
+| `affiliates` | `name`, `token_key`, `streams` (JSON array), `allowed_ips`, `contact_name`, `email`, `active` | One per affiliate; playout side — cable operators and streaming services pulling SRT |
 
-### 5.6 Operator Onboarding
+`streams` is a JSON array of MistServer stream names the entity is authorised for, e.g. `["geo+news", "geo+ent"]`.
 
-1. Create a `channel_group` record in PocketBase:
-   - `name`: operator name
+### 5.6 Affiliate Onboarding
+
+1. Create an `affiliates` record in PocketBase:
+   - `name`: affiliate name (e.g. `Storm Fiber`)
    - `token_key`: unique token string (e.g. `storm-fiber-001`)
-   - `channels`: JSON array of `{name, stream}` objects
-   - `allowed_ips`: comma-separated static IPs or CIDRs
+   - `streams`: JSON array of licensed stream names (e.g. `["geo+news", "geo+ent"]`)
+   - `allowed_ips`: comma-separated static IPs or CIDRs (leave empty to allow any IP)
    - `active`: true
 
-2. Create a `cable_operators` record linked to the group.
-
-3. Add the token to Cloudflare KV (for `/live/` R2 delivery):
+2. Add the token to Cloudflare KV (for `/live/` R2 delivery):
    ```bash
    curl -X PUT "https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/storage/kv/namespaces/{KV_ID}/values/{token}" \
      -H "Authorization: Bearer {CF_TOKEN}" \
-     -d '{"broadcaster":"geo","channels":[{"name":"Geo News","stream":"geo+news"}]}'
+     -d '{"affiliate":"Storm Fiber","streams":["geo+news","geo+ent"]}'
    ```
 
-4. Give the operator their URLs:
+3. Give the affiliate their connection details:
    - **SRT:** `srt://stream.castology.tv:1234?streamid=geo+news/TOKEN&latency=1000`
    - **HLS:** `https://play.castology.tv/hls/geo+news/index.m3u8?token=TOKEN`
    - **R2/CDN HLS:** `https://play.castology.tv/live/geo+news/index.m3u8?token=TOKEN`
    - **M3U playlist:** `https://play.castology.tv/playlist?token=TOKEN`
 
-No MistServer config changes are needed for new operators on existing streams.
+No MistServer config changes are needed for new affiliates on existing streams.
 
 ---
 
@@ -264,7 +263,7 @@ R2-backed HLS delivery for `/live/` paths is gated through a Cloudflare Worker.
 - `GET /health` — public, returns `ok`
 - `GET /hls/*` — **no Worker** (bypass route to origin, MistServer handles auth)
 
-**Authentication:** Bearer token in `Authorization: Bearer {token}` header or `?token=` query parameter. Token is looked up in KV namespace `OPERATOR_TOKENS` (token → `{broadcaster, channels}`). Invalid/missing tokens return 401.
+**Authentication:** Bearer token in `Authorization: Bearer {token}` header or `?token=` query parameter. Token is looked up in KV namespace `OPERATOR_TOKENS` (token → `{affiliate, streams}`). Invalid/missing tokens return 401.
 
 **Playlist rewrite:** Segment filenames in `index.m3u8` are rewritten to append `?token={token}`. This allows players like VLC that follow playlist URLs without forwarding auth headers to still authenticate segment fetches.
 
@@ -444,7 +443,7 @@ Files written to the VPS outside of systemd unit files:
 | `/usr/local/bin/mist-hls-writer-{safe}.sh` | `mistserver-r2-push.sh` | Wrapper: resolves sub-playlist URL, strips token, execs ffmpeg |
 | `/usr/local/bin/mist-seg-push-{safe}.py` | `mistserver-r2-push.sh` | boto3 parallel uploader (segments + playlist) |
 | `/usr/local/bin/tsduck-exporter.py` | `tsduck-exporter.sh` | Prometheus exporter (copied from `/tmp/` uploaded by Terraform) |
-| `/var/www/onboard/index.html` | `pocketbase.sh` | Static operator portal SPA |
+| `/var/www/onboard/index.html` | `pocketbase.sh` | Placeholder page (affiliate portal not yet implemented) |
 | `/opt/pocketbase/` | `pocketbase.sh` | PocketBase binary + data directory |
 | `/var/lib/mist-hls/{stream}/` | `mistserver-r2-push.sh` (mkdir) | HLS segment working directory |
 
@@ -516,13 +515,13 @@ Both roles (streaming and monitoring) run on the same VPS. A VPS failure takes d
 
 The seg-push script's `uploaded` set is trimmed to 200 entries when it exceeds 500. On extremely long streams (many hours), segments not in the trimmed set would be re-uploaded on the next loop iteration. R2's `PUT` is idempotent so this causes redundant uploads, not data corruption. A proper solution would use the playlist window as the only source of truth for "needs uploading."
 
-### 10.4 No Operator Token Rotation
+### 10.4 No Affiliate Token Rotation
 
-Operator `token_key` values in PocketBase are static. There is no token expiry or audit log. Revoking an operator requires setting `active=false` on their `channel_group` and `cable_operators` records. The auth script cache TTL is 0 (no caching) so revocation takes effect on the next connection attempt.
+Affiliate `token_key` values in PocketBase are static. There is no token expiry or audit log. Revoking an affiliate requires setting `active=false` on their `affiliates` record. The auth script has no caching so revocation takes effect on the next connection attempt.
 
 ### 10.5 HLS Auth Tied to MistServer Session Token
 
-For HLS connections, sub-playlist and segment requests use MistServer's internal `?tkn=` session token, not the operator token. The `mist-srt-auth.sh` script passes `?tkn=` requests through without re-validating against PocketBase. If an operator's IP is removed from `allowed_ips`, their existing HLS session continues until the `tkn` expires. New connections will be denied immediately.
+For HLS connections, sub-playlist and segment requests use MistServer's internal `?tkn=` session token, not the affiliate token. The `mist-srt-auth.sh` script passes `?tkn=` requests through without re-validating against PocketBase. If an affiliate's IP is removed from `allowed_ips`, their existing HLS session continues until the `tkn` expires. New connections will be denied immediately.
 
 ### 10.5 Grafana Not Behind Auth Proxy
 
@@ -552,30 +551,28 @@ terraform apply -target=module.mistserver
 terraform apply -target=null_resource.mistserver_r2_push
 ```
 
-### Operator denied — auth debugging
+### Affiliate denied — auth debugging
 
 ```bash
 # Watch auth decisions in real time
 journalctl -t mist-srt-auth -f
 
 # Common DENY reasons:
-# DENY: no token in '...'          → streamid missing /TOKEN or ?token= param
-# DENY: no active channel_group    → token not in PocketBase or active=false
-# DENY: stream '...' not in group  → stream not listed in group's channels JSON
-# DENY: IP x.x.x.x not in allowed_ips → source IP not registered for this group
-# DENY: no active cable_operator   → operator record missing or active=false
-# ERROR: PocketBase auth failed    → check /etc/mist-auth.env credentials
+# DENY: no token in '...'                     → streamid missing /TOKEN or ?token= param
+# DENY: no active affiliate for token=X       → token not in PocketBase or active=false
+# DENY: stream '...' not licensed for ...     → stream not in affiliate's streams array
+# DENY: IP x.x.x.x not in allowed_ips        → source IP not in affiliate's allowed_ips
+# ERROR: PocketBase auth failed               → check /etc/mist-auth.env credentials
 ```
 
-### Add an operator (SRT + HLS)
+### Add an affiliate (SRT + HLS)
 
-1. Create `channel_group` in PocketBase with `token_key`, `channels`, `allowed_ips`, `active=true`
-2. Create `cable_operators` record with `group_id` linking to the group
-3. Add token to Cloudflare KV for `/live/` R2 delivery:
+1. Create `affiliates` record in PocketBase with `token_key`, `streams`, `allowed_ips`, `active=true`
+2. Add token to Cloudflare KV for `/live/` R2 delivery:
 ```bash
 curl -X PUT "https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/storage/kv/namespaces/{KV_ID}/values/{token}" \
   -H "Authorization: Bearer {CF_TOKEN}" \
-  -d '{"broadcaster":"geo","channels":[{"name":"Geo News","stream":"geo+news"}]}'
+  -d '{"affiliate":"Storm Fiber","streams":["geo+news","geo+ent"]}'
 ```
 
 ### Check upload pipeline manually
@@ -604,10 +601,9 @@ journalctl -t mist-srt-auth -f
 | Log message | Cause | Fix |
 |---|---|---|
 | `DENY: no token in 'geo+news'` | Streamid missing `/TOKEN` | Use `streamid=geo+news/TOKEN` |
-| `DENY: no active channel_group for token=X` | Token not in PocketBase or `active=false` | Check PocketBase `channel_groups` |
-| `DENY: stream 'geo+news' not in group` | Stream not in operator's `channels` list | Add stream to `channel_groups.channels` |
-| `DENY: IP x.x.x.x not in allowed_ips` | Source IP not registered | Add IP to `channel_groups.allowed_ips` |
-| `DENY: no active cable_operator` | No active operator record for this group | Check `cable_operators` collection |
+| `DENY: no active affiliate for token=X` | Token not in PocketBase or `active=false` | Check PocketBase `affiliates` collection |
+| `DENY: stream 'geo+news' not licensed for ...` | Stream not in affiliate's `streams` array | Add stream to `affiliates.streams` |
+| `DENY: IP x.x.x.x not in allowed_ips` | Source IP not in affiliate's allowed list | Add IP to `affiliates.allowed_ips` |
 | `ERROR: PocketBase auth failed` | Wrong credentials in `/etc/mist-auth.env` | Update `/etc/mist-auth.env` on VPS |
 
 **Check MistServer log:**
@@ -626,7 +622,7 @@ journalctl -u mistserver -f | grep -E "FAIL|ACCS|PLAY_REWRITE"
 **For `/live/` path** (Cloudflare Worker):
 - Missing `?token=` in URL
 - Token not in Cloudflare KV namespace `OPERATOR_TOKENS`
-- Token value in KV is malformed JSON — must be `{"broadcaster":"geo","channels":[...]}`
+- Token value in KV is malformed JSON — must be `{"affiliate":"Name","streams":["geo+news",...]}`
 
 **For `/hls/` path** (MistServer direct):
 - Check auth log: `journalctl -t mist-srt-auth -f`
@@ -680,7 +676,7 @@ This is expected behaviour when no operator is connected — the log noise is be
 | Item | Priority | Notes |
 |---|---|---|
 | Dedicated CPU VPS | High | Resolve 51.4% steal time |
-| Automated operator token issuance via PocketBase | Medium | Portal exists; integration pending |
+| Affiliate self-service portal | Medium | Placeholder at onboard.castology.tv; not yet implemented |
 | Grafana alerts → email/Slack | Medium | SMTP config pending |
 | Multi-bitrate ladder in MistServer | Low | Requires MistServer transcoding (CPU cost) |
 | Segment cleanup on pipeline restart | Low | Old segments persist on disk until 2h rclone cleanup |

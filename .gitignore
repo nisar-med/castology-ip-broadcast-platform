@@ -1,0 +1,16 @@
+# Secrets
+.env
+*.env
+
+# Terraform
+Infrastructure/terraform/.terraform/
+Infrastructure/terraform/.terraform.lock.hcl
+Infrastructure/terraform/terraform.tfvars
+Infrastructure/terraform/terraform.tfstate
+Infrastructure/terraform/terraform.tfstate.backup
+Infrastructure/terraform/*.tfstate*
+Infrastructure/terraform/crash.log
+
+# OS
+.DS_Store
+Thumbs.db
