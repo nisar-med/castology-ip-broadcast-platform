@@ -46,7 +46,7 @@ scrape_configs:
         labels:
           instance: "mist-streaming"
 
-  - job_name: "tsduck"
+  - job_name: "mist-exporter"
     scrape_interval: 10s
     static_configs:
       - targets: ["${STREAMING_PRIVATE_IP}:${EXPORTER_PORT}"]
@@ -104,32 +104,29 @@ curl -sf -X POST "http://${GRAFANA_AUTH}@localhost:3000/api/dashboards/import" \
     "dashboard": {
       "title": "MistServer Broadcast Quality",
       "uid": "mist-bq",
-      "tags": ["mistserver","broadcast","tsduck"],
+      "tags": ["mistserver","broadcast"],
       "timezone": "browser",
       "refresh": "10s",
       "schemaVersion": 36,
       "panels": [
         {"id":1,"type":"timeseries","title":"Stream Up/Down",
          "gridPos":{"x":0,"y":0,"w":12,"h":6},
-         "targets":[{"expr":"tsduck_stream_up","legendFormat":"{{stream}}"}],
+         "targets":[{"expr":"mist_stream_up","legendFormat":"{{stream}}"}],
          "fieldConfig":{"defaults":{"min":0,"max":1,"thresholds":{"steps":[{"color":"red","value":0},{"color":"green","value":1}]}}}},
-        {"id":2,"type":"timeseries","title":"Bitrate (bps)",
+        {"id":2,"type":"timeseries","title":"Bitrate (kbits/s)",
          "gridPos":{"x":12,"y":0,"w":12,"h":6},
-         "targets":[{"expr":"tsduck_bitrate_bps","legendFormat":"{{stream}}"}]},
-        {"id":3,"type":"timeseries","title":"CC Errors / min",
-         "description":"Continuity Counter errors = dropped MPEG-TS packets = signal loss",
+         "targets":[{"expr":"mist_stream_bitrate_kbits","legendFormat":"{{stream}} {{track}}"}]},
+        {"id":3,"type":"timeseries","title":"Stream FPS",
          "gridPos":{"x":0,"y":6,"w":12,"h":8},
-         "targets":[{"expr":"rate(tsduck_cc_errors_total[1m])*60","legendFormat":"{{stream}}"}],
-         "fieldConfig":{"defaults":{"thresholds":{"steps":[{"color":"green","value":0},{"color":"yellow","value":1},{"color":"red","value":10}]}}}},
-        {"id":4,"type":"timeseries","title":"PCR Errors / min",
-         "description":"PCR errors = timing instability in the transport stream",
+         "targets":[{"expr":"mist_stream_fps","legendFormat":"{{stream}}"}]},
+        {"id":4,"type":"timeseries","title":"Stream Jitter (ms)",
          "gridPos":{"x":12,"y":6,"w":12,"h":8},
-         "targets":[{"expr":"rate(tsduck_pcr_errors_total[1m])*60","legendFormat":"{{stream}}"}],
-         "fieldConfig":{"defaults":{"thresholds":{"steps":[{"color":"green","value":0},{"color":"yellow","value":1},{"color":"red","value":5}]}}}},
-        {"id":5,"type":"stat","title":"Total CC Errors",
+         "targets":[{"expr":"mist_stream_jitter_ms","legendFormat":"{{stream}}"}],
+         "fieldConfig":{"defaults":{"thresholds":{"steps":[{"color":"green","value":0},{"color":"yellow","value":50},{"color":"red","value":200}]}}}},
+        {"id":5,"type":"stat","title":"Active Operator Sessions",
          "gridPos":{"x":0,"y":14,"w":6,"h":4},
-         "targets":[{"expr":"tsduck_cc_errors_total","legendFormat":"{{stream}}"}],
-         "fieldConfig":{"defaults":{"thresholds":{"steps":[{"color":"green","value":0},{"color":"red","value":1}]}}}},
+         "targets":[{"expr":"sum by (stream) (mist_operator_sessions_total{direction=\"output\"})","legendFormat":"{{stream}}"}],
+         "fieldConfig":{"defaults":{"thresholds":{"steps":[{"color":"green","value":0}]}}}},
         {"id":6,"type":"stat","title":"SRT Packet Loss %",
          "gridPos":{"x":6,"y":14,"w":6,"h":4},
          "targets":[{"expr":"rate(mist_packets{pkttype=\"lost\"}[5m])/rate(mist_packets{pkttype=\"sent\"}[5m])*100","legendFormat":"{{stream}} loss%"}],

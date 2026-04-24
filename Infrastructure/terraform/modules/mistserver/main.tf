@@ -39,8 +39,8 @@ resource "null_resource" "provision" {
 
 resource "null_resource" "provision_exporter" {
   triggers = {
-    exporter_script = filemd5("${path.module}/../../scripts/tsduck-exporter.sh")
-    exporter_py     = filemd5("${path.module}/../../scripts/tsduck-exporter.py")
+    exporter_script = filemd5("${path.module}/../../scripts/mist-exporter.sh")
+    exporter_py     = filemd5("${path.module}/../../scripts/mist-exporter.py")
     vps_ip          = var.vps_ip
     stream_names    = join(",", var.stream_names)
     exporter_port   = var.exporter_port
@@ -56,28 +56,28 @@ resource "null_resource" "provision_exporter" {
   }
 
   provisioner "file" {
-    source      = "${path.module}/../../scripts/tsduck-exporter.sh"
-    destination = "/tmp/tsduck-exporter.sh"
+    source      = "${path.module}/../../scripts/mist-exporter.sh"
+    destination = "/tmp/mist-exporter.sh"
   }
 
   provisioner "file" {
-    source      = "${path.module}/../../scripts/tsduck-exporter.py"
-    destination = "/tmp/tsduck-exporter.py"
+    source      = "${path.module}/../../scripts/mist-exporter.py"
+    destination = "/tmp/mist-exporter.py"
   }
 
   # Write env file directly — avoids shell quoting issues with JSON
   provisioner "file" {
     content     = "STREAMS_JSON=${local.streams_json}\nEXPORTER_PORT=${var.exporter_port}\nMIST_API_PORT=${var.api_port}\n"
-    destination = "/etc/tsduck-exporter.env"
+    destination = "/etc/mist-exporter.env"
   }
 
   provisioner "remote-exec" {
     inline = [
-      "chmod +x /tmp/tsduck-exporter.sh",
+      "chmod +x /tmp/mist-exporter.sh",
       join(" ", [
         "MIST_API_PORT=${var.api_port}",
         "EXPORTER_PORT=${var.exporter_port}",
-        "/tmp/tsduck-exporter.sh",
+        "/tmp/mist-exporter.sh",
       ]),
     ]
   }
