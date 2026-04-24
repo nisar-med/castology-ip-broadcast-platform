@@ -47,20 +47,20 @@ registry = CollectorRegistry()
 # Operator sessions (from /api2?clients)
 operator_sessions = Gauge(
     "mist_operator_sessions_total",
-    "Active operator sessions per stream and direction",
-    ["stream", "direction"],
+    "Active operator sessions per stream, direction and connector",
+    ["stream", "direction", "connector"],
     registry=registry,
 )
 session_bytes = Gauge(
     "mist_operator_session_bytes",
     "Bytes transferred per active operator session",
-    ["stream", "ip", "direction"],
+    ["stream", "ip", "direction", "connector"],
     registry=registry,
 )
 session_uptime = Gauge(
     "mist_operator_session_uptime_seconds",
     "Uptime in seconds of active operator session",
-    ["stream", "ip"],
+    ["stream", "ip", "connector"],
     registry=registry,
 )
 
@@ -132,6 +132,9 @@ for _s in STREAM_NAMES:
     r2_segment_lag.labels(stream=_s).set(0)
     r2_segment_age.labels(stream=_s).set(0)
     r2_upload_errors.labels(stream=_s)
+    for _d in ("input", "output", "unknown"):
+        for _c in ("TSSRT", "HLS", "HTTP", "unknown"):
+            operator_sessions.labels(stream=_s, direction=_d, connector=_c).set(0)
 
 # ── MistServer API helpers ────────────────────────────────────────────────────
 
@@ -165,7 +168,7 @@ def _poll_clients():
     session_bytes.clear()
     session_uptime.clear()
 
-    counts: dict[tuple[str, str], int] = {}
+    counts: dict[tuple[str, str, str], int] = {}
 
     for stream_name, stream_info in streams_data.items():
         if stream_name not in STREAM_NAMES:
@@ -174,24 +177,26 @@ def _poll_clients():
         for client in clients:
             if not isinstance(client, dict):
                 continue
-            direction = client.get("direction", "unknown")
+            direction  = client.get("direction", "unknown")
+            connector  = client.get("connector", "unknown")
             ip = client.get("ip", "unknown")
             # Strip IPv6-mapped prefix
             ip = ip.replace("::ffff:", "").strip("[]").split(":")[0] if "::ffff:" in ip or ip.startswith("[") else ip
-            bytes_val = client.get("bytes", 0)
-            uptime_ms = client.get("ms", 0)
+            bytes_val  = client.get("bytes", 0)
+            uptime_ms  = client.get("ms", 0)
 
-            key = (stream_name, direction)
+            key = (stream_name, direction, connector)
             counts[key] = counts.get(key, 0) + 1
-            session_bytes.labels(stream=stream_name, ip=ip, direction=direction).set(bytes_val)
-            session_uptime.labels(stream=stream_name, ip=ip).set(uptime_ms / 1000.0)
+            session_bytes.labels(stream=stream_name, ip=ip, direction=direction, connector=connector).set(bytes_val)
+            session_uptime.labels(stream=stream_name, ip=ip, connector=connector).set(uptime_ms / 1000.0)
 
-    # Reset all known stream/direction combos to 0, then set actuals
+    # Reset all known combos to 0, then set actuals
     for name in STREAM_NAMES:
         for direction in ("input", "output", "unknown"):
-            operator_sessions.labels(stream=name, direction=direction).set(
-                counts.get((name, direction), 0)
-            )
+            for connector in ("TSSRT", "HLS", "HTTP", "unknown"):
+                operator_sessions.labels(stream=name, direction=direction, connector=connector).set(
+                    counts.get((name, direction, connector), 0)
+                )
 
 
 def _poll_active_streams():
