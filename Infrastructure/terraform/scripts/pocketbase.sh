@@ -131,6 +131,44 @@ curl -sf -X POST http://127.0.0.1:8090/api/collections \
     ]
   }' | jq -r '"affiliates collection: \(.id // .message)"' || echo "==> affiliates may already exist"
 
+# broadcaster_feeds — one record per primary/backup ingest path for a broadcaster stream
+echo "==> Creating broadcaster_feeds collection..."
+curl -sf -X POST http://127.0.0.1:8090/api/collections \
+  -H "Content-Type: application/json" \
+  -H "${AUTH}" \
+  -d '{
+    "name": "broadcaster_feeds",
+    "type": "base",
+    "fields": [
+      {"name":"broadcaster_name", "type":"text", "required":true},
+      {"name":"stream",           "type":"text", "required":true},
+      {"name":"feed_role",        "type":"text", "required":true},
+      {"name":"allowed_ips",      "type":"text", "required":false},
+      {"name":"origin_host",      "type":"text", "required":false},
+      {"name":"notes",            "type":"text", "required":false},
+      {"name":"active",           "type":"bool", "required":false}
+    ]
+  }' | jq -r '"broadcaster_feeds collection: \(.id // .message)"' || echo "==> broadcaster_feeds may already exist"
+
+# affiliate_clients — one record per affiliate endpoint/client for a stream
+echo "==> Creating affiliate_clients collection..."
+curl -sf -X POST http://127.0.0.1:8090/api/collections \
+  -H "Content-Type: application/json" \
+  -H "${AUTH}" \
+  -d '{
+    "name": "affiliate_clients",
+    "type": "base",
+    "fields": [
+      {"name":"affiliate_name", "type":"text", "required":true},
+      {"name":"stream",         "type":"text", "required":true},
+      {"name":"client_name",    "type":"text", "required":true},
+      {"name":"endpoint_role",  "type":"text", "required":true},
+      {"name":"allowed_ips",    "type":"text", "required":false},
+      {"name":"notes",          "type":"text", "required":false},
+      {"name":"active",         "type":"bool", "required":false}
+    ]
+  }' | jq -r '"affiliate_clients collection: \(.id // .message)"' || echo "==> affiliate_clients may already exist"
+
 echo "==> PocketBase schema configured"
 
 # ---------------------------------------------------------------------------

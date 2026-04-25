@@ -153,36 +153,36 @@ cat > "${DASH_FILE}" << DASHEOF
     ]},
     "panels": [
       {
-        "id": 1, "type": "table", "title": "Broadcasters (Desired vs Live)",
+        "id": 1, "type": "table", "title": "Broadcaster Feeds (Primary / Backup)",
         "gridPos": {"x": 0, "y": 0, "w": 24, "h": 8},
         "options": {"sortBy": [{"displayName": "Name", "desc": false}]},
         "targets": [
           {
             "refId": "A",
-            "expr": "label_replace(mist_ingest_status{job=\"mist-exporter\", stream=~\"\$stream\"}, \"broadcaster\", \"\$1\", \"name\", \"(.*)\")",
+            "expr": "mist_broadcaster_feed_status{job=\"mist-exporter\", stream=~\"\$stream\"}",
             "instant": true, "format": "table", "legendFormat": "",
             "datasource": {"type": "prometheus", "uid": "${DS_UID}"}
           },
           {
             "refId": "B",
-            "expr": "label_replace(mist_ingest_jitter_ms{job=\"mist-exporter\", stream=~\"\$stream\"}, \"broadcaster\", \"\$1\", \"name\", \"(.*)\")",
+            "expr": "mist_broadcaster_feed_jitter_ms{job=\"mist-exporter\", stream=~\"\$stream\"}",
             "instant": true, "format": "table", "legendFormat": "",
             "datasource": {"type": "prometheus", "uid": "${DS_UID}"}
           },
           {
             "refId": "C",
-            "expr": "label_replace(mist_ingest_loss{job=\"mist-exporter\", stream=~\"\$stream\"}, \"broadcaster\", \"\$1\", \"name\", \"(.*)\")",
+            "expr": "mist_broadcaster_feed_loss{job=\"mist-exporter\", stream=~\"\$stream\"}",
             "instant": true, "format": "table", "legendFormat": "",
             "datasource": {"type": "prometheus", "uid": "${DS_UID}"}
           }
         ],
         "transformations": [
-          {"id": "filterFieldsByName", "options": {"include": {"pattern": "^(broadcaster|stream|ip|Value.*)$"}}},
+          {"id": "filterFieldsByName", "options": {"include": {"pattern": "^(name|stream|feed_role|ip|Value.*)$"}}},
           {"id": "merge", "options": {}},
           {"id": "organize", "options": {
-            "includeByName": {"broadcaster": true, "stream": true, "ip": true, "Value #A": true, "Value #B": true, "Value #C": true},
-            "indexByName": {"broadcaster": 0, "stream": 1, "ip": 2, "Value #A": 3, "Value #B": 4, "Value #C": 5},
-            "renameByName": {"broadcaster": "Name", "stream": "Stream", "ip": "IP", "Value #A": "Status", "Value #B": "Jitter (ms)", "Value #C": "Loss"}
+            "includeByName": {"name": true, "stream": true, "feed_role": true, "ip": true, "Value #A": true, "Value #B": true, "Value #C": true},
+            "indexByName": {"name": 0, "stream": 1, "feed_role": 2, "ip": 3, "Value #A": 4, "Value #B": 5, "Value #C": 6},
+            "renameByName": {"name": "Name", "stream": "Stream", "feed_role": "Feed Role", "ip": "IP", "Value #A": "Status", "Value #B": "Jitter (ms)", "Value #C": "Loss"}
           }}
         ],
         "fieldConfig": {"defaults": {"custom": {"filterable": true}}, "overrides": [
@@ -204,23 +204,42 @@ cat > "${DASH_FILE}" << DASHEOF
         ]}
       },
       {
-        "id": 2, "type": "table", "title": "Affiliates (Desired vs Live)",
+        "id": 2, "type": "table", "title": "Affiliate Clients",
         "gridPos": {"x": 0, "y": 8, "w": 24, "h": 8},
-        "options": {"sortBy": [{"displayName": "Name", "desc": false}]},
-        "targets": [{
-          "refId": "A",
-          "expr": "{__name__=~\"mist_playout_status|mist_playout_loss|mist_playout_uptime_seconds|mist_playout_bytes\", job=\"mist-exporter\", stream=~\"\$stream\"}",
-          "instant": true, "format": "table", "legendFormat": "",
-          "datasource": {"type": "prometheus", "uid": "${DS_UID}"}
-        }],
+        "options": {"sortBy": [{"displayName": "Affiliate", "desc": false}]},
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "mist_affiliate_client_status{job=\"mist-exporter\", stream=~\"\$stream\"}",
+            "instant": true, "format": "table", "legendFormat": "",
+            "datasource": {"type": "prometheus", "uid": "${DS_UID}"}
+          },
+          {
+            "refId": "B",
+            "expr": "mist_affiliate_client_loss{job=\"mist-exporter\", stream=~\"\$stream\"}",
+            "instant": true, "format": "table", "legendFormat": "",
+            "datasource": {"type": "prometheus", "uid": "${DS_UID}"}
+          },
+          {
+            "refId": "C",
+            "expr": "mist_affiliate_client_uptime_seconds{job=\"mist-exporter\", stream=~\"\$stream\"}",
+            "instant": true, "format": "table", "legendFormat": "",
+            "datasource": {"type": "prometheus", "uid": "${DS_UID}"}
+          },
+          {
+            "refId": "D",
+            "expr": "mist_affiliate_client_bytes{job=\"mist-exporter\", stream=~\"\$stream\"}",
+            "instant": true, "format": "table", "legendFormat": "",
+            "datasource": {"type": "prometheus", "uid": "${DS_UID}"}
+          }
+        ],
         "transformations": [
-          {"id": "partitionByValues", "options": {"fields": ["__name__"], "keepFields": false}},
-          {"id": "filterFieldsByName", "options": {"include": {"pattern": "^(name|stream|ip|mist_playout_.*)$"}}},
+          {"id": "filterFieldsByName", "options": {"include": {"pattern": "^(name|client_name|endpoint_role|stream|ip|Value.*)$"}}},
           {"id": "merge", "options": {}},
-          {"id": "filterFieldsByName", "options": {"include": {"names": ["name", "stream", "ip", "mist_playout_status", "mist_playout_loss", "mist_playout_uptime_seconds", "mist_playout_bytes"]}}},
           {"id": "organize", "options": {
-            "indexByName": {"name": 0, "stream": 1, "ip": 2, "mist_playout_status": 3, "mist_playout_loss": 4, "mist_playout_uptime_seconds": 5, "mist_playout_bytes": 6},
-            "renameByName": {"name": "Name", "stream": "Stream", "ip": "IP", "mist_playout_status": "Status", "mist_playout_loss": "Loss", "mist_playout_uptime_seconds": "Uptime", "mist_playout_bytes": "Bytes"}
+            "includeByName": {"name": true, "client_name": true, "endpoint_role": true, "stream": true, "ip": true, "Value #A": true, "Value #B": true, "Value #C": true, "Value #D": true},
+            "indexByName": {"name": 0, "client_name": 1, "endpoint_role": 2, "stream": 3, "ip": 4, "Value #A": 5, "Value #B": 6, "Value #C": 7, "Value #D": 8},
+            "renameByName": {"name": "Affiliate", "client_name": "Client", "endpoint_role": "Role", "stream": "Stream", "ip": "IP", "Value #A": "Status", "Value #B": "Loss", "Value #C": "Uptime", "Value #D": "Bytes"}
           }}
         ],
         "fieldConfig": {"defaults": {"custom": {"filterable": true}}, "overrides": [
