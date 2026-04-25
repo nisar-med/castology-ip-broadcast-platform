@@ -202,7 +202,7 @@ _pb_config = {
     "broadcasters": [],   # [{"name", "streams": [...], "token_key", "allowed_ips"}]
     "broadcaster_feeds": [],  # [{"broadcaster_name", "stream", "feed_role", "allowed_ips"}]
     "groups": [],         # [{"name", "token_key", "channels": [...], "allowed_ips"}]
-    "affiliate_clients": [],  # [{"affiliate_name", "stream", "client_name", "endpoint_role", "allowed_ips"}]
+    "affiliate_clients": [],  # [{"affiliate_name", "stream", "client_name", "endpoint_role", "allowed_ips", "is_test_client"}]
     "tokens": set(),      # all valid token_keys
 }
 
@@ -302,6 +302,7 @@ def poll_pb_config():
                     "client_name": client_name,
                     "endpoint_role": (client.get("endpoint_role") or "primary").strip().lower() or "primary",
                     "allowed_ips": client.get("allowed_ips", ""),
+                    "is_test_client": bool(client.get("is_test_client", False)),
                     "notes": client.get("notes", ""),
                 })
 
@@ -566,7 +567,11 @@ def _build_affiliate_clients(groups: list[dict], affiliate_clients: list[dict]) 
     stream_clients: dict[str, list[dict]] = {stream: [] for stream in STREAM_NAMES}
     for group in groups:
         for stream in group["streams"]:
-            client_defs = clients_by_key.get((group["name"], stream))
+            client_defs = [
+                client
+                for client in clients_by_key.get((group["name"], stream), [])
+                if not client["is_test_client"]
+            ]
             if client_defs:
                 for client in client_defs:
                     stream_clients.setdefault(stream, []).append({
@@ -585,6 +590,20 @@ def _build_affiliate_clients(groups: list[dict], affiliate_clients: list[dict]) 
                     "allowed_ips": group["allowed_ips"],
                 })
     return stream_clients
+
+
+def _test_client_ips(stream: str, connected_ips: set[str], affiliate_clients: list[dict]) -> set[str]:
+    ignored = set()
+    for client in affiliate_clients:
+        if client["stream"] != stream or not client["is_test_client"]:
+            continue
+        allowed = _allowed_ips(client["allowed_ips"])
+        if not allowed:
+            allowed = [client["client_name"]]
+        for ip in connected_ips:
+            if _ip_allowed(ip, allowed):
+                ignored.add(ip)
+    return ignored
 
 
 def _recent_affiliate_auth() -> dict[tuple[str, str], str]:
@@ -804,13 +823,17 @@ def _check_health():
 
     # Check each affiliate client
     for stream in STREAM_NAMES:
+        ignored_test_ips = _test_client_ips(stream, active_outputs.get(stream, set()), affiliate_clients)
+        if ignored_test_ips:
+            log.info("Ignoring test client sessions: stream=%s ips=%s", stream, ",".join(sorted(ignored_test_ips)))
+        monitored_outputs = active_outputs.get(stream, set()) - ignored_test_ips
         stream_groups = affiliate_client_defs.get(stream, [])
         preferred_names = {
             ip: affiliate_name
             for (auth_stream, ip), affiliate_name in affiliate_auth.items()
-            if auth_stream == stream
+            if auth_stream == stream and ip not in ignored_test_ips
         }
-        for g, ip in _assign_connected_ips(stream_groups, active_outputs.get(stream, set()), preferred_names=preferred_names):
+        for g, ip in _assign_connected_ips(stream_groups, monitored_outputs, preferred_names=preferred_names):
             summary_key = (g["name"], stream)
             existing = affiliate_summary.get(summary_key)
             candidate = {

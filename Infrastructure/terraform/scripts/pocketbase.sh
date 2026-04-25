@@ -164,6 +164,7 @@ curl -sf -X POST http://127.0.0.1:8090/api/collections \
       {"name":"client_name",    "type":"text", "required":true},
       {"name":"endpoint_role",  "type":"text", "required":true},
       {"name":"allowed_ips",    "type":"text", "required":false},
+      {"name":"is_test_client", "type":"bool", "required":false},
       {"name":"notes",          "type":"text", "required":false},
       {"name":"active",         "type":"bool", "required":false}
     ]
