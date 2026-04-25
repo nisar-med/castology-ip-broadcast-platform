@@ -201,7 +201,7 @@ _pb_lock = threading.Lock()
 _pb_config = {
     "broadcasters": [],   # [{"name", "streams": [...], "token_key", "allowed_ips"}]
     "broadcaster_feeds": [],  # [{"broadcaster_name", "stream", "feed_role", "allowed_ips"}]
-    "groups": [],         # [{"name", "token_key", "channels": [...], "allowed_ips"}]
+    "groups": [],         # [{"name", "token_key"}]
     "affiliate_clients": [],  # [{"affiliate_name", "stream", "client_name", "endpoint_role", "allowed_ips", "is_test_client"}]
     "tokens": set(),      # all valid token_keys
 }
@@ -275,26 +275,22 @@ def poll_pb_config():
             for g in affiliates:
                 if not g.get("active", True):
                     continue
-                streams = g.get("streams", [])
-                if isinstance(streams, str):
-                    streams = json.loads(streams)
                 tk = g.get("token_key", "")
                 parsed_groups.append({
                     "name":       g.get("name", "unknown"),
                     "token_key":  tk,
-                    "streams":    streams,
-                    "allowed_ips": g.get("allowed_ips", ""),
                 })
                 if tk:
                     tokens.add(tk)
 
+            active_group_names = {group["name"] for group in parsed_groups}
             for client in affiliate_clients:
                 if not client.get("active", True):
                     continue
                 affiliate_name = (client.get("affiliate_name") or "").strip()
                 stream = (client.get("stream") or "").strip()
                 client_name = (client.get("client_name") or "").strip()
-                if not affiliate_name or not stream or not client_name:
+                if not affiliate_name or not stream or not client_name or affiliate_name not in active_group_names:
                     continue
                 parsed_affiliate_clients.append({
                     "affiliate_name": affiliate_name,
@@ -560,35 +556,18 @@ def _build_broadcaster_feeds(broadcasters: list[dict], broadcaster_feeds: list[d
 
 
 def _build_affiliate_clients(groups: list[dict], affiliate_clients: list[dict]) -> dict[str, list[dict]]:
-    clients_by_key: dict[tuple[str, str], list[dict]] = {}
-    for client in affiliate_clients:
-        clients_by_key.setdefault((client["affiliate_name"], client["stream"]), []).append(client)
-
+    group_names = {group["name"] for group in groups}
     stream_clients: dict[str, list[dict]] = {stream: [] for stream in STREAM_NAMES}
-    for group in groups:
-        for stream in group["streams"]:
-            client_defs = [
-                client
-                for client in clients_by_key.get((group["name"], stream), [])
-                if not client["is_test_client"]
-            ]
-            if client_defs:
-                for client in client_defs:
-                    stream_clients.setdefault(stream, []).append({
-                        "name": group["name"],
-                        "stream": stream,
-                        "client_name": client["client_name"],
-                        "endpoint_role": client["endpoint_role"],
-                        "allowed_ips": client["allowed_ips"] or group["allowed_ips"],
-                    })
-            else:
-                stream_clients.setdefault(stream, []).append({
-                    "name": group["name"],
-                    "stream": stream,
-                    "client_name": group["name"],
-                    "endpoint_role": "primary",
-                    "allowed_ips": group["allowed_ips"],
-                })
+    for client in affiliate_clients:
+        if client["affiliate_name"] not in group_names or client["is_test_client"]:
+            continue
+        stream_clients.setdefault(client["stream"], []).append({
+            "name": client["affiliate_name"],
+            "stream": client["stream"],
+            "client_name": client["client_name"],
+            "endpoint_role": client["endpoint_role"],
+            "allowed_ips": client["allowed_ips"],
+        })
     return stream_clients
 
 
@@ -627,7 +606,10 @@ def _recent_affiliate_auth() -> dict[tuple[str, str], str]:
 
     assignments: dict[tuple[str, str], str] = {}
     for line in result.stdout.splitlines():
-        match = re.search(r"ALLOW: stream=(?P<stream>\S+) affiliate=(?P<affiliate>.+?) ip=(?P<ip>\S+)$", line)
+        match = re.search(
+            r"ALLOW: stream=(?P<stream>\S+) affiliate=(?P<affiliate>.+?)(?: client=\S+ role=\S+ test_client=\S+)? ip=(?P<ip>\S+)$",
+            line,
+        )
         if not match:
             continue
         stream = match.group("stream").strip()
@@ -642,7 +624,7 @@ def _recent_affiliate_auth() -> dict[tuple[str, str], str]:
 def _is_registered(ip: str, stream: str, direction: str, known_tokens: set, sessid: str) -> bool:
     with _pb_lock:
         broadcasters = _pb_config["broadcasters"]
-        groups = _pb_config["groups"]
+        affiliate_clients = _pb_config["affiliate_clients"]
 
     # Input sessions — check broadcaster allowed_ips
     if direction == "input":
@@ -652,11 +634,15 @@ def _is_registered(ip: str, stream: str, direction: str, known_tokens: set, sess
                     return True
         return False
 
-    # Output sessions — check operator group allowed_ips
-    for g in groups:
-        if stream in g["streams"]:
-            if _ip_allowed(ip, _allowed_ips(g["allowed_ips"])):
-                return True
+    # Output sessions — check operator affiliate_clients IPs
+    for client in affiliate_clients:
+        if client["stream"] != stream:
+            continue
+        allowed = _allowed_ips(client["allowed_ips"])
+        if not allowed and client["client_name"]:
+            allowed = [client["client_name"]]
+        if _ip_allowed(ip, allowed):
+            return True
 
     return False
 
@@ -865,20 +851,24 @@ def _check_health():
                 affiliate_client_bytes.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip="none").set(0)
                 affiliate_client_uptime.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip="none").set(0)
 
-    for group in groups:
-        for stream in group["streams"]:
-            summary = affiliate_summary.get((group["name"], stream), {
+    configured_affiliate_pairs = sorted({
+        (group["name"], stream)
+        for stream, clients in affiliate_client_defs.items()
+        for group in clients
+    })
+    for affiliate_name, stream in configured_affiliate_pairs:
+            summary = affiliate_summary.get((affiliate_name, stream), {
                 "ip": "none",
                 "status": 0,
                 "loss": 0,
                 "bytes": 0,
                 "uptime": 0,
             })
-            connection_status.labels(name=group["name"], stream=stream, role="operator", ip=summary["ip"]).set(summary["status"])
-            playout_status.labels(name=group["name"], stream=stream, ip=summary["ip"]).set(summary["status"])
-            playout_loss.labels(name=group["name"], stream=stream, ip=summary["ip"]).set(summary["loss"])
-            playout_bytes.labels(name=group["name"], stream=stream, ip=summary["ip"]).set(summary["bytes"])
-            playout_uptime.labels(name=group["name"], stream=stream, ip=summary["ip"]).set(summary["uptime"])
+            connection_status.labels(name=affiliate_name, stream=stream, role="operator", ip=summary["ip"]).set(summary["status"])
+            playout_status.labels(name=affiliate_name, stream=stream, ip=summary["ip"]).set(summary["status"])
+            playout_loss.labels(name=affiliate_name, stream=stream, ip=summary["ip"]).set(summary["loss"])
+            playout_bytes.labels(name=affiliate_name, stream=stream, ip=summary["ip"]).set(summary["bytes"])
+            playout_uptime.labels(name=affiliate_name, stream=stream, ip=summary["ip"]).set(summary["uptime"])
 
 
 # ── R2 pipeline poller ───────────────────────────────────────────────────────

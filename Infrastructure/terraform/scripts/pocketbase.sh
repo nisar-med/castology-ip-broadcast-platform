@@ -121,8 +121,6 @@ curl -sf -X POST http://127.0.0.1:8090/api/collections \
     "fields": [
       {"name":"name",         "type":"text",  "required":true},
       {"name":"token_key",    "type":"text",  "required":true},
-      {"name":"streams",      "type":"json",  "required":false},
-      {"name":"allowed_ips",  "type":"text",  "required":false},
       {"name":"contact_name", "type":"text",  "required":false},
       {"name":"email",        "type":"email", "required":false},
       {"name":"phone",        "type":"text",  "required":false},
