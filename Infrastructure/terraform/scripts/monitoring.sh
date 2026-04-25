@@ -13,9 +13,69 @@ PROMETHEUS_SCRAPE_HOST="${PROMETHEUS_SCRAPE_HOST:-localhost}"
 
 export DEBIAN_FRONTEND=noninteractive
 
+ensure_castology_governance() {
+  mkdir -p /etc/systemd/system
+
+  cat > /etc/systemd/system/castology-platform.target <<'EOF'
+[Unit]
+Description=Castology platform services
+Wants=castology-streaming.target castology-origin.target castology-monitoring.target
+After=castology-streaming.target castology-origin.target castology-monitoring.target
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  cat > /etc/systemd/system/castology-streaming.target <<'EOF'
+[Unit]
+Description=Castology streaming services
+PartOf=castology-platform.target
+EOF
+
+  cat > /etc/systemd/system/castology-origin.target <<'EOF'
+[Unit]
+Description=Castology origin services
+PartOf=castology-platform.target
+EOF
+
+  cat > /etc/systemd/system/castology-monitoring.target <<'EOF'
+[Unit]
+Description=Castology monitoring services
+PartOf=castology-platform.target
+EOF
+
+  cat > /etc/systemd/system/castology.slice <<'EOF'
+[Unit]
+Description=Castology platform slice
+Before=slices.target
+
+[Slice]
+CPUAccounting=true
+MemoryAccounting=true
+TasksAccounting=true
+EOF
+}
+
+register_castology_service() {
+  local unit="$1"
+  local target="$2"
+  if ! systemctl list-unit-files --type=service --no-legend | awk '{print $1}' | grep -qx "$unit"; then
+    return 0
+  fi
+  mkdir -p "/etc/systemd/system/${unit}.d"
+  cat > "/etc/systemd/system/${unit}.d/castology.conf" <<EOF
+[Unit]
+PartOf=${target}.target
+
+[Service]
+Slice=castology.slice
+EOF
+}
+
 echo "==> Installing Prometheus"
 apt-get update -qq
 apt-get install -y -qq prometheus curl jq wget
+ensure_castology_governance
 
 echo "==> Installing Grafana"
 wget -q -O /usr/share/keyrings/grafana.key https://apt.grafana.com/gpg.key
@@ -55,6 +115,16 @@ scrape_configs:
           instance: "mist-streaming"
 EOF
 
+register_castology_service "prometheus.service" "castology-monitoring"
+register_castology_service "grafana-server.service" "castology-monitoring"
+register_castology_service "prometheus-node-exporter.service" "castology-monitoring"
+systemctl daemon-reload
+systemctl enable castology-platform.target
+systemctl add-wants castology-monitoring.target prometheus.service
+systemctl add-wants castology-monitoring.target grafana-server.service
+if systemctl list-unit-files --type=service --no-legend | awk '{print $1}' | grep -qx "prometheus-node-exporter.service"; then
+  systemctl add-wants castology-monitoring.target prometheus-node-exporter.service
+fi
 systemctl enable prometheus
 systemctl restart prometheus
 echo "==> Prometheus running"

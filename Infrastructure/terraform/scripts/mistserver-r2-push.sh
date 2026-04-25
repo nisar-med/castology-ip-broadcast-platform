@@ -26,6 +26,70 @@ SAFE_NAME="${STREAM_NAME//[^a-zA-Z0-9]/-}"
 WRAPPER="/usr/local/bin/mist-hls-writer-${SAFE_NAME}.sh"
 PLAYLIST_PUSHER="/usr/local/bin/mist-playlist-push-${SAFE_NAME}.sh"
 
+ensure_castology_governance() {
+  mkdir -p /etc/systemd/system
+
+  cat > /etc/systemd/system/castology-platform.target <<'EOF'
+[Unit]
+Description=Castology platform services
+Wants=castology-streaming.target castology-origin.target castology-monitoring.target
+After=castology-streaming.target castology-origin.target castology-monitoring.target
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  cat > /etc/systemd/system/castology-streaming.target <<'EOF'
+[Unit]
+Description=Castology streaming services
+PartOf=castology-platform.target
+EOF
+
+  cat > /etc/systemd/system/castology-origin.target <<'EOF'
+[Unit]
+Description=Castology origin services
+PartOf=castology-platform.target
+EOF
+
+  cat > /etc/systemd/system/castology-monitoring.target <<'EOF'
+[Unit]
+Description=Castology monitoring services
+PartOf=castology-platform.target
+EOF
+
+  cat > /etc/systemd/system/castology.slice <<'EOF'
+[Unit]
+Description=Castology platform slice
+Before=slices.target
+
+[Slice]
+CPUAccounting=true
+MemoryAccounting=true
+TasksAccounting=true
+EOF
+}
+
+register_castology_service() {
+  local unit="$1"
+  mkdir -p "/etc/systemd/system/${unit}.d"
+  cat > "/etc/systemd/system/${unit}.d/castology.conf" <<EOF
+[Unit]
+PartOf=castology-streaming.target
+
+[Service]
+Slice=castology.slice
+EOF
+}
+
+register_castology_timer() {
+  local unit="$1"
+  mkdir -p "/etc/systemd/system/${unit}.d"
+  cat > "/etc/systemd/system/${unit}.d/castology.conf" <<'EOF'
+[Unit]
+PartOf=castology-streaming.target
+EOF
+}
+
 # ---------------------------------------------------------------------------
 # Install dependencies
 # ---------------------------------------------------------------------------
@@ -39,6 +103,7 @@ fi
 pip3 install -q boto3
 
 mkdir -p "${HLS_DIR}"
+ensure_castology_governance
 
 # ---------------------------------------------------------------------------
 # rclone config
@@ -295,6 +360,15 @@ WantedBy=timers.target
 EOF
 
 systemctl daemon-reload
+
+register_castology_service "${FFMPEG_UNIT}.service"
+register_castology_service "${PLAYLIST_UNIT}.service"
+register_castology_timer "${CLEANUP_UNIT}.timer"
+systemctl daemon-reload
+systemctl enable castology-platform.target
+systemctl add-wants castology-streaming.target "${FFMPEG_UNIT}.service"
+systemctl add-wants castology-streaming.target "${PLAYLIST_UNIT}.service"
+systemctl add-wants castology-streaming.target "${CLEANUP_UNIT}.timer"
 
 systemctl enable "${FFMPEG_UNIT}"   && systemctl restart "${FFMPEG_UNIT}"
 systemctl enable "${PLAYLIST_UNIT}" && systemctl restart "${PLAYLIST_UNIT}"

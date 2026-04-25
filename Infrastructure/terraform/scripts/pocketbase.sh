@@ -17,6 +17,64 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq curl jq unzip
 
+ensure_castology_governance() {
+  mkdir -p /etc/systemd/system
+
+  cat > /etc/systemd/system/castology-platform.target <<'EOF'
+[Unit]
+Description=Castology platform services
+Wants=castology-streaming.target castology-origin.target castology-monitoring.target
+After=castology-streaming.target castology-origin.target castology-monitoring.target
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  cat > /etc/systemd/system/castology-streaming.target <<'EOF'
+[Unit]
+Description=Castology streaming services
+PartOf=castology-platform.target
+EOF
+
+  cat > /etc/systemd/system/castology-origin.target <<'EOF'
+[Unit]
+Description=Castology origin services
+PartOf=castology-platform.target
+EOF
+
+  cat > /etc/systemd/system/castology-monitoring.target <<'EOF'
+[Unit]
+Description=Castology monitoring services
+PartOf=castology-platform.target
+EOF
+
+  cat > /etc/systemd/system/castology.slice <<'EOF'
+[Unit]
+Description=Castology platform slice
+Before=slices.target
+
+[Slice]
+CPUAccounting=true
+MemoryAccounting=true
+TasksAccounting=true
+EOF
+}
+
+register_castology_service() {
+  local unit="$1"
+  local target="$2"
+  mkdir -p "/etc/systemd/system/${unit}.d"
+  cat > "/etc/systemd/system/${unit}.d/castology.conf" <<EOF
+[Unit]
+PartOf=${target}.target
+
+[Service]
+Slice=castology.slice
+EOF
+}
+
+ensure_castology_governance
+
 # ---------------------------------------------------------------------------
 # Install PocketBase
 # ---------------------------------------------------------------------------
@@ -57,7 +115,10 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
+register_castology_service "pocketbase.service" "castology-origin"
 systemctl daemon-reload
+systemctl enable castology-platform.target
+systemctl add-wants castology-origin.target pocketbase.service
 systemctl enable pocketbase
 systemctl restart pocketbase
 

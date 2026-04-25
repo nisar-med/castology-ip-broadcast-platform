@@ -53,7 +53,7 @@ Encoder (OBS/vMix)                      Affiliate STB/IRD/Player
 
 | Role | IP | Services |
 |---|---|---|
-| Streaming | 83.147.18.124 | MistServer, ffmpeg, boto3 seg-push, tsduck-exporter, nginx |
+| Streaming | 83.147.18.124 | MistServer, mist-exporter, ffmpeg, boto3 seg-push, nginx |
 | Monitoring | 83.147.18.124 (same VPS) | Prometheus, Grafana, PocketBase, nginx |
 
 Both roles currently share one VPS. The Terraform `vps` map supports different IPs; split is straightforward if load grows.
@@ -169,7 +169,7 @@ This prevents unbounded segment accumulation in R2. `index.m3u8` is excluded fro
 Affiliates (cable operators, streaming services) are authenticated on every new session via the MistServer `PLAY_REWRITE` trigger. Two factors are required:
 
 1. **Token** — a unique `token_key` assigned to each affiliate in PocketBase
-2. **IP** — source IP must match the `allowed_ips` list on the affiliate record (comma-separated IPs or CIDRs); empty `allowed_ips` allows any IP
+2. **Client endpoint** — source IP must match an active `affiliate_clients` record for that affiliate and stream
 
 Both SRT and HLS connections use the same trigger script and the same PocketBase data.
 
@@ -182,8 +182,8 @@ MistServer calls `/opt/mist-scripts/mist-srt-auth.sh` for every new session. The
 3. For **HLS**: parses token from `?token=` in request URL; `?tkn=` sub-requests pass through (MistServer session token, already authenticated)
 4. Authenticates with PocketBase superadmin API
 5. Looks up `affiliate` by `token_key`
-6. Checks requested stream is in the affiliate's `streams` array
-7. Checks source IP against affiliate's `allowed_ips` (skipped if empty)
+6. Looks up active `affiliate_clients` rows for `affiliate_name + stream`
+7. Checks source IP against the matched client row's `allowed_ips` (or `client_name` when used as a single-IP value)
 8. Returns the real stream name on success (e.g. `geo+news`), exits 1 on denial
 
 Logs to systemd journal as `mist-srt-auth`. Monitor with:
@@ -220,27 +220,36 @@ The Cloudflare Worker route `play.castology.tv/hls/*` has **no Worker assigned**
 | Collection | Key fields | Purpose |
 |---|---|---|
 | `broadcasters` | `name`, `token_key`, `streams` (JSON array), `allowed_ips`, `active` | One per broadcaster; ingest side — companies pushing SRT into MistServer |
-| `affiliates` | `name`, `token_key`, `streams` (JSON array), `allowed_ips`, `contact_name`, `email`, `active` | One per affiliate; playout side — cable operators and streaming services pulling SRT |
+| `broadcaster_feeds` | `broadcaster_name`, `stream`, `feed_role`, `allowed_ips`, `active` | One per primary/backup broadcaster ingest path |
+| `affiliates` | `name`, `token_key`, `contact_name`, `email`, `active` | One per affiliate; parent identity and token metadata only |
+| `affiliate_clients` | `affiliate_name`, `stream`, `client_name`, `endpoint_role`, `allowed_ips`, `is_test_client`, `active` | One per affiliate endpoint/IP on a stream; source of truth for auth and monitoring |
 
-`streams` is a JSON array of MistServer stream names the entity is authorised for, e.g. `["geo+news", "geo+ent"]`.
+`affiliate_clients` is now the source of truth for affiliate stream entitlement. If an affiliate has no active client rows for a stream, auth denies new sessions for that stream.
 
 ### 5.6 Affiliate Onboarding
 
 1. Create an `affiliates` record in PocketBase:
    - `name`: affiliate name (e.g. `Storm Fiber`)
    - `token_key`: unique token string (e.g. `storm-fiber-001`)
-   - `streams`: JSON array of licensed stream names (e.g. `["geo+news", "geo+ent"]`)
-   - `allowed_ips`: comma-separated static IPs or CIDRs (leave empty to allow any IP)
    - `active`: true
 
-2. Add the token to Cloudflare KV (for `/live/` R2 delivery):
+2. Create one or more `affiliate_clients` records:
+   - `affiliate_name`: parent affiliate name (e.g. `Storm Fiber`)
+   - `stream`: Mist stream name (e.g. `geo+news`)
+   - `client_name`: endpoint label or IP (e.g. `61.5.131.218`)
+   - `endpoint_role`: endpoint purpose (`primary`, `backup`, `test`, etc.)
+   - `allowed_ips`: single IP, CIDR, or comma-separated list for that client endpoint
+   - `is_test_client`: true only for auth-test endpoints that must be excluded from monitoring
+   - `active`: true
+
+3. Add the token to Cloudflare KV (for `/live/` R2 delivery):
    ```bash
    curl -X PUT "https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/storage/kv/namespaces/{KV_ID}/values/{token}" \
      -H "Authorization: Bearer {CF_TOKEN}" \
      -d '{"affiliate":"Storm Fiber","streams":["geo+news","geo+ent"]}'
    ```
 
-3. Give the affiliate their connection details:
+4. Give the affiliate their connection details:
    - **SRT:** `srt://stream.castology.tv:1234?streamid=geo+news/TOKEN&latency=1000`
    - **HLS:** `https://play.castology.tv/hls/geo+news/index.m3u8?token=TOKEN`
    - **R2/CDN HLS:** `https://play.castology.tv/live/geo+news/index.m3u8?token=TOKEN`
@@ -279,34 +288,32 @@ R2-backed HLS delivery for `/live/` paths is gated through a Cloudflare Worker.
 
 | Target | Metrics |
 |---|---|
-| `tsduck-exporter:9101` | MPEG-TS stream health, R2 pipeline health |
+| `mist-exporter:9101` | Castology session status, broadcaster feed status, affiliate client status, R2 pipeline health |
 | `mistserver:4242/prometheus?pass={passphrase}` | MistServer internal metrics |
 | `node-exporter:9100` | VPS system metrics (CPU, RAM, disk, network) |
 
 The exporter port 9101 is firewalled to `127.0.0.1` only; Prometheus scrapes via localhost. MistServer API port 4242 is firewalled to `127.0.0.1` only.
 
-### 6.2 tsduck-exporter Metrics
+### 6.2 mist-exporter Metrics
 
-**MPEG-TS stream quality (per stream):**
-
-| Metric | Type | Description |
-|---|---|---|
-| `tsduck_stream_up` | Gauge | 1 = tsp connected and receiving |
-| `tsduck_bitrate_bps` | Gauge | Current stream bitrate |
-| `tsduck_cc_errors_total` | Counter | Continuity counter errors (dropped packets) |
-| `tsduck_pcr_errors_total` | Counter | PCR timing errors (clock jitter) |
-
-CC errors are the primary signal for upstream encoder or SRT transport problems.
-
-**MistServer push connections (per stream):**
+**Broadcaster ingest / feed status:**
 
 | Metric | Type | Description |
 |---|---|---|
-| `mist_push_active_connections` | Gauge | Active outbound SRT push connections |
-| `mist_push_bytes_sent_total` | Counter | Total bytes sent on push connections |
-| `mist_push_uptime_seconds` | Gauge | Uptime of longest-running push connection |
+| `mist_broadcaster_feed_status` | Gauge | 1 = broadcaster feed online, 0 = offline |
+| `mist_broadcaster_feed_jitter_ms` | Gauge | Jitter reported for the stream |
+| `mist_broadcaster_feed_loss` | Gauge | Packet loss ratio for that feed |
 
-Polled from MistServer's `push_list` API every 10 seconds.
+**Affiliate client / playout status:**
+
+| Metric | Type | Description |
+|---|---|---|
+| `mist_affiliate_client_status` | Gauge | 1 = affiliate endpoint online, 0 = offline |
+| `mist_affiliate_client_loss` | Gauge | Packet loss ratio for that endpoint |
+| `mist_affiliate_client_uptime_seconds` | Gauge | Endpoint session uptime |
+| `mist_affiliate_client_bytes` | Gauge | Bytes transferred for that endpoint |
+
+Test clients (`is_test_client=true`) are excluded from affiliate summary monitoring and dashboard rows, but still exist as auth-capable endpoint records.
 
 **R2 pipeline health (per stream):**
 
@@ -319,20 +326,14 @@ Polled from MistServer's `push_list` API every 10 seconds.
 
 Polled every 5 seconds. Lag > 5 is warning; lag > 10 is critical. Segment age > 30s indicates ffmpeg has stopped writing.
 
-### 6.3 Grafana Dashboard — MistServer Broadcast Quality
+### 6.3 Grafana Dashboard — MistServer Session Status
 
-Dashboard `mist-bq` at `http://83.147.18.124:3000`. Panels:
+Dashboard `mist-bq` at `http://83.147.18.124:3000`. Key tables:
 
-1. Stream Up (stat, per stream)
-2. Bitrate (timeseries, per stream)
-3. CC Errors/min (timeseries, alert on > 0)
-4. Push Active Connections (stat)
-5. Push Bytes Sent (timeseries)
-6. Push Uptime (stat)
-7. R2 ffmpeg Writer Up (stat, green/red)
-8. R2 Segment Lag (timeseries, warn >5, crit >10)
-9. R2 Latest Segment Age (timeseries, warn >10s, crit >30s)
-10. R2 Upload Errors/min (timeseries, alert on any)
+1. **Broadcaster Feeds (Primary / Backup)** — `Name / Stream / Feed Role / IP / Status / Jitter / Loss`
+2. **Affiliate Clients** — `Affiliate / Client / Role / Stream / IP / Status / Loss / Uptime / Bytes`
+
+The dashboard merges exporter metrics by shared labels so desired-vs-live state is visible as explicit rows rather than inferred from raw Mist sessions.
 
 ---
 
@@ -349,11 +350,11 @@ Every persistent process on the VPS is a systemd unit. All units are installed a
 | `mist-hls-writer-geo-news` | simple | `/usr/local/bin/mist-hls-writer-geo-news.sh` → `ffmpeg` | — | always, 3s | `null_resource.mistserver_r2_push` → `mistserver-r2-push.sh` |
 | `mist-seg-push-geo-ent` | simple | `/usr/bin/python3 /usr/local/bin/mist-seg-push-geo-ent.py` | — | always, 2s | `null_resource.mistserver_r2_push` → `mistserver-r2-push.sh` |
 | `mist-seg-push-geo-news` | simple | `/usr/bin/python3 /usr/local/bin/mist-seg-push-geo-news.py` | — | always, 2s | `null_resource.mistserver_r2_push` → `mistserver-r2-push.sh` |
-| `mist-r2-cleanup-geo-ent.timer` | timer | triggers `.service` below | — | OnUnitActiveSec=30min | `null_resource.mistserver_r2_push` → `mistserver-r2-push.sh` |
-| `mist-r2-cleanup-geo-ent.service` | oneshot | `rclone delete` | — | — | `null_resource.mistserver_r2_push` → `mistserver-r2-push.sh` |
-| `mist-r2-cleanup-geo-news.timer` | timer | triggers `.service` below | — | OnUnitActiveSec=30min | `null_resource.mistserver_r2_push` → `mistserver-r2-push.sh` |
-| `mist-r2-cleanup-geo-news.service` | oneshot | `rclone delete` | — | — | `null_resource.mistserver_r2_push` → `mistserver-r2-push.sh` |
-| `tsduck-exporter` | simple | `/usr/bin/python3 /usr/local/bin/tsduck-exporter.py` | 9101 | always, 5s | `module.mistserver` → `null_resource.provision_exporter` → `tsduck-exporter.sh` |
+| `mist-r2-cleanup-geo-ent.timer` | timer | triggers `.service` below | — | every 2 min | `null_resource.mistserver_r2_push` → `mistserver-r2-push.sh` |
+| `mist-r2-cleanup-geo-ent.service` | oneshot | `/usr/bin/python3 /usr/local/bin/mist-r2-cleanup-geo-ent.py` | — | — | `null_resource.mistserver_r2_push` → `mistserver-r2-push.sh` |
+| `mist-r2-cleanup-geo-news.timer` | timer | triggers `.service` below | — | every 2 min | `null_resource.mistserver_r2_push` → `mistserver-r2-push.sh` |
+| `mist-r2-cleanup-geo-news.service` | oneshot | `/usr/bin/python3 /usr/local/bin/mist-r2-cleanup-geo-news.py` | — | — | `null_resource.mistserver_r2_push` → `mistserver-r2-push.sh` |
+| `mist-exporter` | simple | `/usr/bin/python3 /usr/local/bin/mist-exporter.py` | 9101 | always, 5s | `module.mistserver` → `null_resource.provision_exporter` → `mist-exporter.sh` |
 | `nginx` | forking | `/usr/sbin/nginx` | 80 | always | `module.nginx` → `nginx.sh` |
 
 **Stream-per-service naming:** Stream names use `+` (e.g. `geo+ent`). Systemd unit names replace all non-alphanumeric characters with `-` → `geo-ent`, `geo-news`. The safe name is derived once in `mistserver-r2-push.sh` as `SAFE_NAME="${STREAM_NAME//[^a-zA-Z0-9]/-}"`.
@@ -361,7 +362,7 @@ Every persistent process on the VPS is a systemd unit. All units are installed a
 **`After=` dependencies:**
 - `mist-hls-writer-*` → `mistserver.service` (waits for MistServer HTTP port to be ready)
 - `mist-seg-push-*` → `mist-hls-writer-*.service` (waits for first segments to appear)
-- `tsduck-exporter` → `mistserver.service` (connects to SRT output ports)
+- `mist-exporter` → `mistserver.service`
 
 ### 7.2 Monitoring VPS Services
 
@@ -369,10 +370,33 @@ Every persistent process on the VPS is a systemd unit. All units are installed a
 |---|---|---|---|---|---|
 | `prometheus` | simple | `/usr/bin/prometheus` | 9090 | always | `module.monitoring` → `monitoring.sh` |
 | `grafana-server` | simple | `/usr/sbin/grafana-server` | 3000 | always | `module.monitoring` → `monitoring.sh` |
+| `prometheus-node-exporter` | simple | `/usr/bin/prometheus-node-exporter` | 9100 | always | distro package / monitoring node |
 | `pocketbase` | simple | `/opt/pocketbase/pocketbase serve` | 8090 (localhost only) | always, 5s | `module.pocketbase` → `pocketbase.sh` |
 | `nginx` | forking | `/usr/sbin/nginx` | 80 | always | `module.nginx` → `nginx.sh` |
 
-### 7.3 Terraform Provisioning Map
+### 7.3 Service Governance
+
+Services are grouped with native systemd targets and a shared slice:
+
+| Unit | Purpose |
+|---|---|
+| `castology-platform.target` | All Castology-managed services |
+| `castology-streaming.target` | Mist, exporter, HLS writers, seg-push services, cleanup timers |
+| `castology-origin.target` | nginx and PocketBase |
+| `castology-monitoring.target` | Prometheus, Grafana, node-exporter |
+| `castology.slice` | Shared accounting slice for the grouped services |
+
+Useful commands:
+
+```bash
+systemctl list-dependencies castology-platform.target
+systemctl list-dependencies castology-streaming.target
+systemctl restart castology-streaming.target
+systemctl stop castology-monitoring.target
+systemctl status castology-origin.target
+```
+
+### 7.4 Terraform Provisioning Map
 
 All services are installed and managed via `null_resource` provisioners using SSH remote-exec. None use cloud-init or configuration management tools. The mapping from Terraform resource to shell script to systemd unit(s):
 
@@ -382,13 +406,15 @@ main.tf
 │   ├── null_resource.provision
 │   │   └── mistserver.sh           → installs MistServer
 │   │                                  enables: mistserver.service
+│   │                                  groups:  castology-streaming.target
 │   └── null_resource.provision_exporter
-│       └── tsduck-exporter.sh      → builds TSduck from source (~10 min, once only)
-│                                      enables: tsduck-exporter.service
+│       └── mist-exporter.sh        → installs Python exporter
+│                                      enables: mist-exporter.service
+│                                      groups:  castology-streaming.target
 │
 ├── null_resource.mistserver_r2_push  (main.tf — runs per stream_name)
 │   └── mistserver-r2-push.sh       → installs ffmpeg, boto3
-│                                      enables (per stream):
+│                                      enables / groups (per stream):
 │                                        mist-hls-writer-{safe}.service
 │                                        mist-seg-push-{safe}.service
 │                                        mist-r2-cleanup-{safe}.timer
@@ -398,37 +424,40 @@ main.tf
 │   └── monitoring.sh               → installs Prometheus + Grafana
 │                                      enables: prometheus.service
 │                                               grafana-server.service
+│                                      groups:  castology-monitoring.target
 │
 ├── module.pocketbase         (modules/pocketbase/main.tf)
 │   └── pocketbase.sh               → installs PocketBase binary
 │                                      enables: pocketbase.service
+│                                      groups:  castology-origin.target
 │                                      bootstraps: superadmin, collections
 │                                      deploys:  /var/www/onboard/index.html
 │
 └── module.nginx              (modules/nginx/main.tf — per unique VPS IP)
     └── nginx.sh                    → installs nginx
-                                      enables: nginx.service
-                                      configures sites (from var.nginx_sites):
-                                        play.castology.tv    → :8080
-                                        monitoring.castology.tv → :3000
-                                        onboard.castology.tv → :8090 + /var/www/onboard
+                                       enables: nginx.service
+                                       groups:  castology-origin.target
+                                       configures sites (from var.nginx_sites):
+                                         play.castology.tv    → :8080
+                                         monitoring.castology.tv → :3000
+                                         onboard.castology.tv → :8090 + /var/www/onboard
 ```
 
-### 7.4 Re-provision Triggers
+### 7.5 Re-provision Triggers
 
-Each `null_resource` has a `triggers` block. Terraform re-runs the provisioner only when a trigger value changes. This prevents re-running the 10-minute TSduck build on every `terraform apply`.
+Each `null_resource` has a `triggers` block. Terraform re-runs the provisioner only when a trigger value changes. This keeps targeted reprovisioning small instead of reinstalling unrelated services on every `terraform apply`.
 
 | Resource | Triggers re-provision when... |
 |---|---|
 | `module.mistserver / null_resource.provision` | `mistserver.sh` changes, VPS IP changes, Prometheus passphrase changes |
-| `module.mistserver / null_resource.provision_exporter` | `tsduck-exporter.sh` changes, `tsduck-exporter.py` changes, port config changes |
+| `module.mistserver / null_resource.provision_exporter` | `mist-exporter.sh` changes, `mist-exporter.py` changes, port config changes |
 | `module.mistserver / null_resource.provision_srt_auth` | `mist-srt-auth.sh` changes, PocketBase email/password changes |
 | `null_resource.mistserver_r2_push` | `mistserver-r2-push.sh` changes, R2 endpoint/bucket/key changes, stream list changes |
 | `module.monitoring / null_resource.provision` | `monitoring.sh` changes, scrape IP changes |
 | `module.pocketbase / null_resource.provision` | `pocketbase.sh` changes, admin email changes |
 | `module.nginx / null_resource.provision` | `nginx.sh` changes (per unique VPS IP) |
 
-### 7.5 Service Configuration Files on Disk
+### 7.6 Service Configuration Files on Disk
 
 Files written to the VPS outside of systemd unit files:
 
@@ -436,34 +465,36 @@ Files written to the VPS outside of systemd unit files:
 |---|---|---|
 | `/etc/mistserver.conf` | `mistserver.sh` (Python inline) | MistServer protocols, stream config, Prometheus passphrase |
 | `/etc/mist-auth.env` | `mistserver` module `provision_srt_auth` | PocketBase credentials for `mist-srt-auth.sh` (chmod 600) |
-| `/opt/mist-scripts/mist-srt-auth.sh` | `mistserver` module `provision_srt_auth` | PLAY_REWRITE trigger: validates operator token + IP |
-| `/etc/tsduck-exporter.env` | `tsduck-exporter.sh` | `STREAMS_JSON`, `EXPORTER_PORT`, `MIST_API_PORT` — read by `tsduck-exporter.service` via `EnvironmentFile=` |
-| `/etc/prometheus/prometheus.yml` | `monitoring.sh` | Scrape targets (MistServer + tsduck-exporter) |
+| `/opt/mist-scripts/mist-srt-auth.sh` | `mistserver` module `provision_srt_auth` | PLAY_REWRITE trigger: validates affiliate token + active affiliate client IP |
+| `/etc/mist-exporter.env` | `mist-exporter.sh` | `STREAMS_JSON`, `EXPORTER_PORT`, `MIST_API_PORT` — read by `mist-exporter.service` via `EnvironmentFile=` |
+| `/etc/prometheus/prometheus.yml` | `monitoring.sh` | Scrape targets (MistServer + mist-exporter) |
 | `/root/.config/rclone/rclone.conf` | `mistserver-r2-push.sh` | R2 credentials for cleanup timer only |
 | `/usr/local/bin/mist-hls-writer-{safe}.sh` | `mistserver-r2-push.sh` | Wrapper: resolves sub-playlist URL, strips token, execs ffmpeg |
 | `/usr/local/bin/mist-seg-push-{safe}.py` | `mistserver-r2-push.sh` | boto3 parallel uploader (segments + playlist) |
-| `/usr/local/bin/tsduck-exporter.py` | `tsduck-exporter.sh` | Prometheus exporter (copied from `/tmp/` uploaded by Terraform) |
+| `/usr/local/bin/mist-exporter.py` | `mist-exporter.sh` | Prometheus exporter (copied from `/tmp/` uploaded by Terraform) |
 | `/var/www/onboard/index.html` | `pocketbase.sh` | Placeholder page (affiliate portal not yet implemented) |
 | `/opt/pocketbase/` | `pocketbase.sh` | PocketBase binary + data directory |
 | `/var/lib/mist-hls/{stream}/` | `mistserver-r2-push.sh` (mkdir) | HLS segment working directory |
 
 ---
 
-## 9. TSduck Architecture
+## 9. mist-exporter Architecture
 
-TSduck (`tsp`) connects to MistServer's SRT output ports (1236, 1238) as a caller. One `tsp` process per stream, running in a dedicated thread, reconnecting automatically on disconnect.
+`mist-exporter.py` runs alongside MistServer and polls:
 
-```
-tsp --realtime
-  -I srt --caller 127.0.0.1:{port} --streamid {name} --latency 500
-  -P continuity --json-line=CC:
-  -P bitrate_monitor --periodic-bitrate 5 --json-line=BR:
-  -O drop
-```
+- Mist `/api {"clients": {"time": -3}}`
+- Mist `/api {"active_streams": null}`
+- PocketBase collections: `broadcasters`, `broadcaster_feeds`, `affiliates`, `affiliate_clients`
+- recent `mist-srt-auth` journal entries for token-aware affiliate attribution
 
-Output is piped to the exporter which parses `CC:{...}` and `BR:{...}` JSON lines. TSduck is built from source (no distro package for the SRT-enabled build); the build runs once and is idempotent — subsequent Terraform applies skip the 10-minute cmake build if `tsp` is already in PATH.
+It emits:
 
-The TSduck exporter is provisioned independently from MistServer (`null_resource.provision_exporter`) so that changes to the Python exporter do not re-trigger the TSduck build.
+- broadcaster feed metrics (`mist_broadcaster_feed_*`)
+- affiliate client metrics (`mist_affiliate_client_*`)
+- summary ingest/playout metrics (`mist_ingest_*`, `mist_playout_*`, `mist_connection_status`)
+- raw session and R2 pipeline metrics
+
+This keeps Grafana state aligned with both live Mist sessions and the configured desired state in PocketBase.
 
 ---
 
@@ -517,11 +548,11 @@ The seg-push script's `uploaded` set is trimmed to 200 entries when it exceeds 5
 
 ### 10.4 No Affiliate Token Rotation
 
-Affiliate `token_key` values in PocketBase are static. There is no token expiry or audit log. Revoking an affiliate requires setting `active=false` on their `affiliates` record. The auth script has no caching so revocation takes effect on the next connection attempt.
+Affiliate `token_key` values in PocketBase are static. There is no token expiry or audit log. Revoking an affiliate requires setting `active=false` on the parent `affiliates` record or `active=false` on the relevant `affiliate_clients` rows. The auth script has no caching so revocation takes effect on the next connection attempt.
 
 ### 10.5 HLS Auth Tied to MistServer Session Token
 
-For HLS connections, sub-playlist and segment requests use MistServer's internal `?tkn=` session token, not the affiliate token. The `mist-srt-auth.sh` script passes `?tkn=` requests through without re-validating against PocketBase. If an affiliate's IP is removed from `allowed_ips`, their existing HLS session continues until the `tkn` expires. New connections will be denied immediately.
+For HLS connections, sub-playlist and segment requests use MistServer's internal `?tkn=` session token, not the affiliate token. The `mist-srt-auth.sh` script passes `?tkn=` requests through without re-validating against PocketBase. If an `affiliate_clients` row is disabled or removed, existing HLS playback can continue until the Mist `tkn` session expires. New connections will be denied immediately.
 
 ### 10.5 Grafana Not Behind Auth Proxy
 
@@ -535,8 +566,8 @@ Grafana on port 3000 is accessible from `83.147.18.124/32` only (firewall rule).
 
 1. Check `r2_ffmpeg_up` in Grafana — if 0, `systemctl restart mist-hls-writer-{safe}`
 2. Check `r2_segment_lag_count` — if rising, check `journalctl -u mist-seg-push-{safe} -n 50`
-3. Check `tsduck_stream_up` — if 0, upstream encoder is not pushing SRT
-4. Check CC error rate — if spiking, upstream is dropping packets (encoder/network issue)
+3. Check `mist_broadcaster_feed_status` — if 0, upstream encoder is not pushing that broadcaster feed
+4. Check `mist_broadcaster_feed_loss` / `mist_broadcaster_feed_jitter_ms` — if elevated, upstream or transport quality is degraded
 
 ### Re-provision after config change
 
@@ -560,14 +591,14 @@ journalctl -t mist-srt-auth -f
 # Common DENY reasons:
 # DENY: no token in '...'                     → streamid missing /TOKEN or ?token= param
 # DENY: no active affiliate for token=X       → token not in PocketBase or active=false
-# DENY: stream '...' not licensed for ...     → stream not in affiliate's streams array
-# DENY: IP x.x.x.x not in allowed_ips        → source IP not in affiliate's allowed_ips
+# DENY: IP x.x.x.x not authorized via affiliate_clients → no active client row for that affiliate+stream+IP
 # ERROR: PocketBase auth failed               → check /etc/mist-auth.env credentials
 ```
 
 ### Add an affiliate (SRT + HLS)
 
-1. Create `affiliates` record in PocketBase with `token_key`, `streams`, `allowed_ips`, `active=true`
+1. Create `affiliates` record in PocketBase with `token_key`, `active=true`
+2. Create one or more active `affiliate_clients` rows with `stream`, `allowed_ips`, and optional `is_test_client`
 2. Add token to Cloudflare KV for `/live/` R2 delivery:
 ```bash
 curl -X PUT "https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/storage/kv/namespaces/{KV_ID}/values/{token}" \
@@ -602,8 +633,7 @@ journalctl -t mist-srt-auth -f
 |---|---|---|
 | `DENY: no token in 'geo+news'` | Streamid missing `/TOKEN` | Use `streamid=geo+news/TOKEN` |
 | `DENY: no active affiliate for token=X` | Token not in PocketBase or `active=false` | Check PocketBase `affiliates` collection |
-| `DENY: stream 'geo+news' not licensed for ...` | Stream not in affiliate's `streams` array | Add stream to `affiliates.streams` |
-| `DENY: IP x.x.x.x not in allowed_ips` | Source IP not in affiliate's allowed list | Add IP to `affiliates.allowed_ips` |
+| `DENY: IP x.x.x.x not authorized via affiliate_clients` | No active client row matches that affiliate + stream + IP | Add or enable the matching `affiliate_clients` row |
 | `ERROR: PocketBase auth failed` | Wrong credentials in `/etc/mist-auth.env` | Update `/etc/mist-auth.env` on VPS |
 
 **Check MistServer log:**
