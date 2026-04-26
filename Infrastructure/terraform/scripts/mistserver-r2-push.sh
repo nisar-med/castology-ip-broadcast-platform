@@ -23,8 +23,7 @@ set -euo pipefail
 
 HLS_DIR="/var/lib/mist-hls/${STREAM_NAME}"
 SAFE_NAME="${STREAM_NAME//[^a-zA-Z0-9]/-}"
-WRAPPER="/usr/local/bin/mist-hls-writer-${SAFE_NAME}.sh"
-PLAYLIST_PUSHER="/usr/local/bin/mist-playlist-push-${SAFE_NAME}.sh"
+WRAPPER="/usr/local/bin/cast-hls-write-${SAFE_NAME}.sh"
 
 ensure_castology_governance() {
   mkdir -p /etc/systemd/system
@@ -89,6 +88,27 @@ register_castology_timer() {
 PartOf=castology-streaming.target
 EOF
 }
+
+# ---------------------------------------------------------------------------
+# Migrate from old mist-* unit names if present
+# ---------------------------------------------------------------------------
+for old_unit in \
+    "mist-hls-writer-${SAFE_NAME}" \
+    "mist-seg-push-${SAFE_NAME}" \
+    "mist-r2-cleanup-${SAFE_NAME}" \
+    "mist-playlist-push-${SAFE_NAME}"; do
+  if systemctl is-active --quiet "${old_unit}" 2>/dev/null; then
+    systemctl stop "${old_unit}" || true
+    systemctl disable "${old_unit}" || true
+  fi
+  rm -f "/etc/systemd/system/${old_unit}.service" \
+        "/etc/systemd/system/${old_unit}.timer"
+done
+rm -f \
+  "/usr/local/bin/mist-hls-writer-${SAFE_NAME}.sh" \
+  "/usr/local/bin/mist-seg-push-${SAFE_NAME}.py" \
+  "/usr/local/bin/mist-r2-cleanup-${SAFE_NAME}.py" \
+  "/usr/local/bin/mist-playlist-push-${SAFE_NAME}.sh"
 
 # ---------------------------------------------------------------------------
 # Install dependencies
@@ -160,7 +180,7 @@ chmod +x "${WRAPPER}"
 # ---------------------------------------------------------------------------
 # ffmpeg HLS writer service — restarts automatically on token rotation
 # ---------------------------------------------------------------------------
-FFMPEG_UNIT="mist-hls-writer-${SAFE_NAME}"
+FFMPEG_UNIT="cast-hls-write-${SAFE_NAME}"
 
 cat > "/etc/systemd/system/${FFMPEG_UNIT}.service" << EOF
 [Unit]
@@ -183,8 +203,8 @@ EOF
 # then uploads a snapshot of index.m3u8. boto3 sends no Content-MD5 header
 # so R2 never rejects a live-written playlist (rclone's BadDigest problem).
 # ---------------------------------------------------------------------------
-SEG_PUSH_SCRIPT="/usr/local/bin/mist-seg-push-${SAFE_NAME}.py"
-PLAYLIST_UNIT="mist-seg-push-${SAFE_NAME}"
+SEG_PUSH_SCRIPT="/usr/local/bin/cast-hls-push-${SAFE_NAME}.py"
+PLAYLIST_UNIT="cast-hls-push-${SAFE_NAME}"
 
 cat > "${SEG_PUSH_SCRIPT}" << PUSH_EOF
 #!/usr/bin/env python3
@@ -269,8 +289,8 @@ EOF
 # 2 min is sufficient for a live stream: the HLS playlist window is 10×2s=20s,
 # so even a slow player only needs the last ~30s. 2h was wrong for live.
 # ---------------------------------------------------------------------------
-CLEANUP_UNIT="mist-r2-cleanup-${SAFE_NAME}"
-CLEANUP_SCRIPT="/usr/local/bin/mist-r2-cleanup-${SAFE_NAME}.py"
+CLEANUP_UNIT="cast-hls-clean-${SAFE_NAME}"
+CLEANUP_SCRIPT="/usr/local/bin/cast-hls-clean-${SAFE_NAME}.py"
 
 cat > "${CLEANUP_SCRIPT}" << CLEANUP_EOF
 #!/usr/bin/env python3

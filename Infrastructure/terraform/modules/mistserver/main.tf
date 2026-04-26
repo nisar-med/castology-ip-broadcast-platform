@@ -40,7 +40,7 @@ resource "null_resource" "provision" {
 resource "null_resource" "provision_exporter" {
   triggers = {
     exporter_script = filemd5("${path.module}/../../scripts/mist-exporter.sh")
-    exporter_py     = filemd5("${path.module}/../../scripts/mist-exporter.py")
+    exporter_py     = filemd5("${path.module}/../../scripts/cast-prom-metrics.py")
     vps_ip          = var.vps_ip
     stream_names    = join(",", var.stream_names)
     exporter_port   = var.exporter_port
@@ -61,14 +61,14 @@ resource "null_resource" "provision_exporter" {
   }
 
   provisioner "file" {
-    source      = "${path.module}/../../scripts/mist-exporter.py"
-    destination = "/tmp/mist-exporter.py"
+    source      = "${path.module}/../../scripts/cast-prom-metrics.py"
+    destination = "/tmp/cast-prom-metrics.py"
   }
 
   # Write env file directly — avoids shell quoting issues with JSON
   provisioner "file" {
     content     = "STREAMS_JSON=${local.streams_json}\nEXPORTER_PORT=${var.exporter_port}\nMIST_API_PORT=${var.api_port}\nPB_URL=http://127.0.0.1:8090\nPB_EMAIL=${var.pb_email}\nPB_PASS=${var.pb_password}\n"
-    destination = "/etc/mist-exporter.env"
+    destination = "/etc/cast-prom-metrics.env"
   }
 
   provisioner "remote-exec" {
@@ -85,9 +85,9 @@ resource "null_resource" "provision_exporter" {
   depends_on = [null_resource.provision]
 }
 
-resource "null_resource" "provision_srt_auth" {
+resource "null_resource" "provision_stream_auth" {
   triggers = {
-    script      = filemd5("${path.module}/../../scripts/mist-srt-auth.sh")
+    script      = filemd5("${path.module}/../../scripts/cast-mist-stream-auth.sh")
     vps_ip      = var.vps_ip
     pb_email    = var.pb_email
     pb_password = var.pb_password
@@ -102,15 +102,15 @@ resource "null_resource" "provision_srt_auth" {
   }
 
   provisioner "file" {
-    source      = "${path.module}/../../scripts/mist-srt-auth.sh"
-    destination = "/usr/local/bin/mist-srt-auth.sh"
+    source      = "${path.module}/../../scripts/cast-mist-stream-auth.sh"
+    destination = "/usr/local/bin/cast-mist-stream-auth.sh"
   }
 
   provisioner "remote-exec" {
     inline = [
-      "chmod +x /usr/local/bin/mist-srt-auth.sh",
-      "printf 'PB_URL=http://127.0.0.1:8090\\nPB_EMAIL=${var.pb_email}\\nPB_PASS=${var.pb_password}\\n' > /etc/mist-auth.env",
-      "chmod 600 /etc/mist-auth.env",
+      "chmod +x /usr/local/bin/cast-mist-stream-auth.sh",
+      "printf 'PB_URL=http://127.0.0.1:8090\\nPB_EMAIL=${var.pb_email}\\nPB_PASS=${var.pb_password}\\n' > /etc/cast-mist-stream-auth.env",
+      "chmod 600 /etc/cast-mist-stream-auth.env",
     ]
   }
 

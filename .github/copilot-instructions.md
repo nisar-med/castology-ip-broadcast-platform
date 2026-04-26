@@ -41,31 +41,31 @@ PocketBase is provisioned by `scripts/pocketbase.sh`. The current collections ar
 
 All scripts live in `Infrastructure/terraform/scripts/`. Terraform provisions them to the VPS at first deploy; after that, manual hotfixes use `scp` directly to the canonical path below.
 
-All scripts deploy to `/usr/local/bin/` on the VPS. There is no `/opt/mist-scripts/`.
+All Castology scripts are prefixed `cast-` and deploy to `/usr/local/bin/` on the VPS.
 
-| Script | VPS path | Deployed by | Consumer |
-|--------|----------|-------------|----------|
-| `mist-exporter.py` | `/usr/local/bin/mist-exporter.py` | `mist-exporter.sh` (via `/tmp/`) | `mist-exporter.service` |
-| `mist-srt-auth.sh` | `/usr/local/bin/mist-srt-auth.sh` | Terraform file provisioner | MistServer `PLAY_REWRITE` trigger |
-| `mist-hls-writer-{stream}.sh` | `/usr/local/bin/mist-hls-writer-{safe}.sh` | `mistserver-r2-push.sh` | `mist-hls-writer-{safe}.service` |
-| `mist-seg-push-{stream}.py` | `/usr/local/bin/mist-seg-push-{safe}.py` | `mistserver-r2-push.sh` | `mist-seg-push-{safe}.service` |
-| `mist-r2-cleanup-{stream}.py` | `/usr/local/bin/mist-r2-cleanup-{safe}.py` | `mistserver-r2-push.sh` | `mist-r2-cleanup-{safe}.service` |
+| Source script | VPS path | Deployed by | Consumer |
+|---------------|----------|-------------|----------|
+| `cast-prom-metrics.py` | `/usr/local/bin/cast-prom-metrics.py` | `mist-exporter.sh` (via `/tmp/`) | `cast-prom-metrics.service` |
+| `cast-mist-stream-auth.sh` | `/usr/local/bin/cast-mist-stream-auth.sh` | Terraform file provisioner | MistServer `PLAY_REWRITE` trigger |
+| *(generated)* | `/usr/local/bin/cast-hls-write-{safe}.sh` | `mistserver-r2-push.sh` | `cast-hls-write-{safe}.service` |
+| *(generated)* | `/usr/local/bin/cast-hls-push-{safe}.py` | `mistserver-r2-push.sh` | `cast-hls-push-{safe}.service` |
+| *(generated)* | `/usr/local/bin/cast-hls-clean-{safe}.py` | `mistserver-r2-push.sh` | `cast-hls-clean-{safe}.timer` |
 
 Hotfix deploy commands (run from `Infrastructure/terraform/scripts/`):
 ```bash
-# Exporter
-scp -i ~/.ssh/id_ed25519 mist-exporter.py root@83.147.18.124:/usr/local/bin/mist-exporter.py
-ssh -i ~/.ssh/id_ed25519 root@83.147.18.124 systemctl restart mist-exporter
+# Prometheus metrics exporter
+scp -i ~/.ssh/id_ed25519 cast-prom-metrics.py root@83.147.18.124:/usr/local/bin/cast-prom-metrics.py
+ssh -i ~/.ssh/id_ed25519 root@83.147.18.124 systemctl restart cast-prom-metrics
 
-# Auth trigger (no restart needed — MistServer spawns it per-request)
-scp -i ~/.ssh/id_ed25519 mist-srt-auth.sh root@83.147.18.124:/usr/local/bin/mist-srt-auth.sh
+# MistServer stream auth trigger (no restart needed — spawned per-request)
+scp -i ~/.ssh/id_ed25519 cast-mist-stream-auth.sh root@83.147.18.124:/usr/local/bin/cast-mist-stream-auth.sh
 ```
 
 ## Key conventions
 
 - Stream names use `+` as a meaningful separator: `geo+news`, `geo+ent`. Do not replace `+` with `-` in real stream identifiers. Hyphenated names are only for derived safe names like systemd units (`mist-hls-writer-geo-news`).
 - Keep the Worker path and MistServer-origin path aligned when changing auth or playback behavior. `/live/*` uses Cloudflare KV + R2; `/hls/*` uses MistServer `PLAY_REWRITE`.
-- `mist-srt-auth.sh` restores `+` after MistServer decodes it as a space, reads affiliate tokens from `token_key`, and allows HLS sub-requests with `?tkn=` to pass through without revalidation. Preserve that behavior unless you are intentionally changing session handling.
+- `cast-mist-stream-auth.sh` restores `+` after MistServer decodes it as a space, reads affiliate tokens from `token_key`, and allows HLS sub-requests with `?tkn=` to pass through without revalidation. Preserve that behavior unless you are intentionally changing session handling.
 - The ffmpeg wrapper in `mistserver-r2-push.sh` fetches the master playlist from localhost, extracts the track playlist, and strips MistServer's rotating `?tkn=` token before handing the URL to ffmpeg. That token-stripping is required so long-running ffmpeg jobs survive token rotation.
 - Use PocketBase `affiliates` fields `token_key`, `streams`, `allowed_ips`, and `active` for viewer/operator authorization. Older notes about `channel_groups` or `cable_operators` are stale.
 - Worker KV values are JSON shaped like `{"affiliate":"Name","streams":["geo+news","geo+ent"]}`. If you change token payload structure, update both the Worker and any onboarding/runbook docs.

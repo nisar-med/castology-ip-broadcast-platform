@@ -73,31 +73,33 @@ ensure_castology_governance
 # /etc/mist-exporter.env is written by the Terraform file provisioner before this script runs
 
 # ---------------------------------------------------------------------------
-# Migrate from old tsduck-exporter service if present
+# Migrate from old service names if present
 # ---------------------------------------------------------------------------
-if systemctl is-active --quiet tsduck-exporter 2>/dev/null; then
-  systemctl stop tsduck-exporter || true
-  systemctl disable tsduck-exporter || true
-fi
-rm -f /etc/systemd/system/tsduck-exporter.service \
-      /usr/local/bin/tsduck-exporter.py \
-      /etc/tsduck-exporter.env
+for old in tsduck-exporter mist-exporter; do
+  if systemctl is-active --quiet "$old" 2>/dev/null; then
+    systemctl stop "$old" || true
+    systemctl disable "$old" || true
+  fi
+  rm -f /etc/systemd/system/"${old}".service
+done
+rm -f /usr/local/bin/tsduck-exporter.py /etc/tsduck-exporter.env \
+      /usr/local/bin/mist-exporter.py    /etc/mist-exporter.env
 
 # ---------------------------------------------------------------------------
-# Deploy mist-exporter.py (uploaded by Terraform file provisioner)
+# Deploy cast-prom-metrics.py (uploaded by Terraform file provisioner)
 # ---------------------------------------------------------------------------
-cp /tmp/mist-exporter.py /usr/local/bin/mist-exporter.py
-chmod +x /usr/local/bin/mist-exporter.py
+cp /tmp/cast-prom-metrics.py /usr/local/bin/cast-prom-metrics.py
+chmod +x /usr/local/bin/cast-prom-metrics.py
 
-cat > /etc/systemd/system/mist-exporter.service << 'UNIT'
+cat > /etc/systemd/system/cast-prom-metrics.service << 'UNIT'
 [Unit]
-Description=MistServer API Prometheus Exporter
+Description=Castology Prometheus metrics exporter
 After=network.target mistserver.service
 
 [Service]
 Type=simple
-EnvironmentFile=/etc/mist-exporter.env
-ExecStart=/usr/bin/python3 /usr/local/bin/mist-exporter.py
+EnvironmentFile=/etc/cast-prom-metrics.env
+ExecStart=/usr/bin/python3 /usr/local/bin/cast-prom-metrics.py
 Restart=always
 RestartSec=5
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
@@ -106,10 +108,10 @@ Environment=PATH=/usr/local/bin:/usr/bin:/bin
 WantedBy=multi-user.target
 UNIT
 
-register_castology_service "mist-exporter.service" "castology-streaming"
+register_castology_service "cast-prom-metrics.service" "castology-streaming"
 systemctl daemon-reload
 systemctl enable castology-platform.target
-systemctl add-wants castology-streaming.target mist-exporter.service
-systemctl enable mist-exporter
-systemctl restart mist-exporter
-echo "==> mist-exporter running on port ${EXPORTER_PORT}"
+systemctl add-wants castology-streaming.target cast-prom-metrics.service
+systemctl enable cast-prom-metrics
+systemctl restart cast-prom-metrics
+echo "==> cast-prom-metrics running on port ${EXPORTER_PORT}"
