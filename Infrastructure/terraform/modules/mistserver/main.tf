@@ -101,18 +101,14 @@ resource "null_resource" "provision_srt_auth" {
     timeout     = "10m"
   }
 
-  provisioner "remote-exec" {
-    inline = ["mkdir -p /opt/mist-scripts"]
-  }
-
   provisioner "file" {
     source      = "${path.module}/../../scripts/mist-srt-auth.sh"
-    destination = "/opt/mist-scripts/mist-srt-auth.sh"
+    destination = "/usr/local/bin/mist-srt-auth.sh"
   }
 
   provisioner "remote-exec" {
     inline = [
-      "chmod +x /opt/mist-scripts/mist-srt-auth.sh",
+      "chmod +x /usr/local/bin/mist-srt-auth.sh",
       "printf 'PB_URL=http://127.0.0.1:8090\\nPB_EMAIL=${var.pb_email}\\nPB_PASS=${var.pb_password}\\n' > /etc/mist-auth.env",
       "chmod 600 /etc/mist-auth.env",
     ]

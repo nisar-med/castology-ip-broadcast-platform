@@ -41,24 +41,24 @@ PocketBase is provisioned by `scripts/pocketbase.sh`. The current collections ar
 
 All scripts live in `Infrastructure/terraform/scripts/`. Terraform provisions them to the VPS at first deploy; after that, manual hotfixes use `scp` directly to the canonical path below.
 
-| Script | Canonical VPS path | Deployed by | Service reads it |
-|--------|--------------------|-------------|-----------------|
+All scripts deploy to `/usr/local/bin/` on the VPS. There is no `/opt/mist-scripts/`.
+
+| Script | VPS path | Deployed by | Consumer |
+|--------|----------|-------------|----------|
 | `mist-exporter.py` | `/usr/local/bin/mist-exporter.py` | `mist-exporter.sh` (via `/tmp/`) | `mist-exporter.service` |
-| `mist-srt-auth.sh` | `/opt/mist-scripts/mist-srt-auth.sh` | Terraform file provisioner | MistServer `PLAY_REWRITE` trigger |
+| `mist-srt-auth.sh` | `/usr/local/bin/mist-srt-auth.sh` | Terraform file provisioner | MistServer `PLAY_REWRITE` trigger |
 | `mist-hls-writer-{stream}.sh` | `/usr/local/bin/mist-hls-writer-{safe}.sh` | `mistserver-r2-push.sh` | `mist-hls-writer-{safe}.service` |
 | `mist-seg-push-{stream}.py` | `/usr/local/bin/mist-seg-push-{safe}.py` | `mistserver-r2-push.sh` | `mist-seg-push-{safe}.service` |
 | `mist-r2-cleanup-{stream}.py` | `/usr/local/bin/mist-r2-cleanup-{safe}.py` | `mistserver-r2-push.sh` | `mist-r2-cleanup-{safe}.service` |
 
-**`/opt/mist-scripts/` contains only `mist-srt-auth.sh`.** Do not deploy other scripts there — `mist-exporter.py` belongs in `/usr/local/bin/`.
-
-Hotfix deploy commands:
+Hotfix deploy commands (run from `Infrastructure/terraform/scripts/`):
 ```bash
 # Exporter
-scp -i ~/.ssh/id_ed25519 scripts/mist-exporter.py root@83.147.18.124:/usr/local/bin/mist-exporter.py
+scp -i ~/.ssh/id_ed25519 mist-exporter.py root@83.147.18.124:/usr/local/bin/mist-exporter.py
 ssh -i ~/.ssh/id_ed25519 root@83.147.18.124 systemctl restart mist-exporter
 
-# Auth trigger (no service restart — MistServer spawns it per-request)
-scp -i ~/.ssh/id_ed25519 scripts/mist-srt-auth.sh root@83.147.18.124:/opt/mist-scripts/mist-srt-auth.sh
+# Auth trigger (no restart needed — MistServer spawns it per-request)
+scp -i ~/.ssh/id_ed25519 mist-srt-auth.sh root@83.147.18.124:/usr/local/bin/mist-srt-auth.sh
 ```
 
 ## Key conventions
