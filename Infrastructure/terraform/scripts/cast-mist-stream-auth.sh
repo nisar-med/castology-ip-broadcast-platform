@@ -110,7 +110,6 @@ for item in items:
         print(json.dumps({
             "client_name": item.get("client_name", ""),
             "endpoint_role": item.get("endpoint_role", ""),
-            "is_test_client": bool(item.get("is_test_client", False)),
         }))
         sys.exit(0)
 
@@ -119,14 +118,22 @@ PY
 )
 
 if [[ -z "$client_match" ]]; then
-    log "DENY: IP $client_ip not authorized via affiliate_clients for affiliate '$affiliate_name' stream '$sname'"
+    log "DENY: no active affiliate_client match for ip=$client_ip affiliate='$affiliate_name' stream='$sname' (check allowed_ips and active flag)"
     exit 1
 fi
 
 client_name=$(echo "$client_match" | python3 -c "import sys,json; print(json.load(sys.stdin).get('client_name',''))")
 endpoint_role=$(echo "$client_match" | python3 -c "import sys,json; print(json.load(sys.stdin).get('endpoint_role',''))")
-is_test_client=$(echo "$client_match" | python3 -c "import sys,json; print('true' if json.load(sys.stdin).get('is_test_client') else 'false')")
 
-log "ALLOW: stream=$sname affiliate=$affiliate_name client=$client_name role=$endpoint_role test_client=$is_test_client ip=$client_ip"
+# Enforce 1 session per IP per stream.
+# MistSession records the real client IP for both SRT and HLS (via trustedproxy).
+session_count=$(ps -eo args | grep "MistSession.*--streamname ${sname} .*--ip ${client_ip}" | grep -cv grep || true)
+session_count="${session_count:-0}"
+if [[ "$session_count" -ge 1 ]]; then
+    log "DENY: duplicate session stream=$sname affiliate=$affiliate_name client=$client_name ip=$client_ip connector=$connector existing=$session_count"
+    exit 1
+fi
+
+log "ALLOW: stream=$sname affiliate=$affiliate_name client=$client_name role=$endpoint_role ip=$client_ip"
 printf '%s' "$sname"
 exit 0

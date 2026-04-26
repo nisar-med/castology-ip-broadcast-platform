@@ -107,7 +107,7 @@ scrape_configs:
         labels:
           instance: "mist-streaming"
 
-  - job_name: "mist-exporter"
+  - job_name: "cast-prom-metrics"
     scrape_interval: 10s
     static_configs:
       - targets: ["${PROMETHEUS_SCRAPE_HOST}:${EXPORTER_PORT}"]
@@ -217,7 +217,7 @@ cat > "${DASH_FILE}" << DASHEOF
     "templating": {"list": [
       {"name": "stream", "label": "Stream", "type": "query",
        "datasource": {"type": "prometheus", "uid": "${DS_UID}"},
-       "query": {"query": "label_values(mist_ingest_status{job=\"mist-exporter\"}, stream)", "refId": "A"},
+       "query": {"query": "label_values(mist_ingest_status{job=\"cast-prom-metrics\"}, stream)", "refId": "A"},
        "includeAll": true, "multi": true,
        "current": {"text": "All", "value": "\$__all"}, "refresh": 2, "sort": 1}
     ]},
@@ -229,19 +229,19 @@ cat > "${DASH_FILE}" << DASHEOF
         "targets": [
           {
             "refId": "A",
-            "expr": "mist_broadcaster_feed_status{job=\"mist-exporter\", stream=~\"\$stream\"}",
+            "expr": "mist_broadcaster_feed_status{job=\"cast-prom-metrics\", stream=~\"\$stream\"}",
             "instant": true, "format": "table", "legendFormat": "",
             "datasource": {"type": "prometheus", "uid": "${DS_UID}"}
           },
           {
             "refId": "B",
-            "expr": "mist_broadcaster_feed_jitter_ms{job=\"mist-exporter\", stream=~\"\$stream\"}",
+            "expr": "mist_broadcaster_feed_jitter_ms{job=\"cast-prom-metrics\", stream=~\"\$stream\"}",
             "instant": true, "format": "table", "legendFormat": "",
             "datasource": {"type": "prometheus", "uid": "${DS_UID}"}
           },
           {
             "refId": "C",
-            "expr": "mist_broadcaster_feed_loss{job=\"mist-exporter\", stream=~\"\$stream\"}",
+            "expr": "mist_broadcaster_feed_loss{job=\"cast-prom-metrics\", stream=~\"\$stream\"}",
             "instant": true, "format": "table", "legendFormat": "",
             "datasource": {"type": "prometheus", "uid": "${DS_UID}"}
           }
@@ -280,25 +280,25 @@ cat > "${DASH_FILE}" << DASHEOF
         "targets": [
           {
             "refId": "A",
-            "expr": "mist_affiliate_client_status{job=\"mist-exporter\", stream=~\"\$stream\"}",
+            "expr": "mist_affiliate_client_status{job=\"cast-prom-metrics\", stream=~\"\$stream\"}",
             "instant": true, "format": "table", "legendFormat": "",
             "datasource": {"type": "prometheus", "uid": "${DS_UID}"}
           },
           {
             "refId": "B",
-            "expr": "mist_affiliate_client_loss{job=\"mist-exporter\", stream=~\"\$stream\"}",
+            "expr": "mist_affiliate_client_loss{job=\"cast-prom-metrics\", stream=~\"\$stream\"}",
             "instant": true, "format": "table", "legendFormat": "",
             "datasource": {"type": "prometheus", "uid": "${DS_UID}"}
           },
           {
             "refId": "C",
-            "expr": "mist_affiliate_client_uptime_seconds{job=\"mist-exporter\", stream=~\"\$stream\"}",
+            "expr": "mist_affiliate_client_uptime_seconds{job=\"cast-prom-metrics\", stream=~\"\$stream\"}",
             "instant": true, "format": "table", "legendFormat": "",
             "datasource": {"type": "prometheus", "uid": "${DS_UID}"}
           },
           {
             "refId": "D",
-            "expr": "mist_affiliate_client_bytes{job=\"mist-exporter\", stream=~\"\$stream\"}",
+            "expr": "mist_affiliate_client_bytes{job=\"cast-prom-metrics\", stream=~\"\$stream\"}",
             "instant": true, "format": "table", "legendFormat": "",
             "datasource": {"type": "prometheus", "uid": "${DS_UID}"}
           }

@@ -70,7 +70,7 @@ apt-get install -y -qq python3 python3-pip
 pip3 install -q prometheus-client
 ensure_castology_governance
 
-# /etc/mist-exporter.env is written by the Terraform file provisioner before this script runs
+# /etc/cast-prom-metrics.env is written by the Terraform file provisioner before this script runs
 
 # ---------------------------------------------------------------------------
 # Migrate from old service names if present
