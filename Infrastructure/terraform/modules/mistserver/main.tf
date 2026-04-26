@@ -39,7 +39,7 @@ resource "null_resource" "provision" {
 
 resource "null_resource" "provision_exporter" {
   triggers = {
-    exporter_script = filemd5("${path.module}/../../scripts/mist-exporter.sh")
+    exporter_script = filemd5("${path.module}/../../scripts/cast-prom-metrics-install.sh")
     exporter_py     = filemd5("${path.module}/../../scripts/cast-prom-metrics.py")
     vps_ip          = var.vps_ip
     stream_names    = join(",", var.stream_names)
@@ -56,8 +56,8 @@ resource "null_resource" "provision_exporter" {
   }
 
   provisioner "file" {
-    source      = "${path.module}/../../scripts/mist-exporter.sh"
-    destination = "/tmp/mist-exporter.sh"
+    source      = "${path.module}/../../scripts/cast-prom-metrics-install.sh"
+    destination = "/tmp/cast-prom-metrics-install.sh"
   }
 
   provisioner "file" {
@@ -73,11 +73,11 @@ resource "null_resource" "provision_exporter" {
 
   provisioner "remote-exec" {
     inline = [
-      "chmod +x /tmp/mist-exporter.sh",
+      "chmod +x /tmp/cast-prom-metrics-install.sh",
       join(" ", [
         "MIST_API_PORT=${var.api_port}",
         "EXPORTER_PORT=${var.exporter_port}",
-        "/tmp/mist-exporter.sh",
+        "/tmp/cast-prom-metrics-install.sh",
       ]),
     ]
   }
