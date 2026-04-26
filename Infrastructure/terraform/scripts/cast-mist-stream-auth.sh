@@ -42,8 +42,13 @@ if [[ "$connector" == "HLS" ]]; then
 elif [[ "$connector" == "TSSRT" ]]; then
     sname="${stream%%/*}"
     token="${stream#*/}"
-    if [[ -z "$sname" || "$token" == "$stream" ]]; then
-        log "DENY: no token in '$stream'"
+    if [[ -z "$sname" ]]; then
+        # Empty stream name — internal MistServer probe, pass through silently
+        printf '%s' "$stream"
+        exit 0
+    fi
+    if [[ "$token" == "$stream" ]]; then
+        log "DENY: no token in SRT stream '$stream' from ip=$client_ip (expected format: streamname/token)"
         exit 1
     fi
 fi
