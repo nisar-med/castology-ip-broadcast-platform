@@ -21,20 +21,27 @@ apt-get install -y -qq ufw
 
 ufw allow 22/tcp comment "SSH"
 
-# TCP open to all
+# TCP open to all (port 80 is handled separately via Cloudflare IP allowlist)
 if [ -n "$ALLOW_TCP" ]; then
   IFS=',' read -ra PORTS <<< "$ALLOW_TCP"
   for port in "${PORTS[@]}"; do
     [ "$port" = "22" ] && continue   # already added
+    [ "$port" = "80" ] && continue   # handled below via CF IP allowlist
     echo "==> Allow TCP $port"
     case "$port" in
-      80)   comment="HTTP (nginx — Cloudflare proxy)" ;;
       443)  comment="HTTPS" ;;
       *)    comment="TCP $port" ;;
     esac
     ufw allow "${port}/tcp" comment "$comment"
   done
 fi
+
+# Port 80 restricted to Cloudflare edge IPs only (origin lockdown)
+CF_IPS_V4="173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22"
+CF_IPS_V6="2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32"
+for cidr in $CF_IPS_V4 $CF_IPS_V6; do
+  ufw allow proto tcp from "$cidr" to any port 80 comment "HTTP Cloudflare"
+done
 
 # UDP open to all
 if [ -n "$ALLOW_UDP" ]; then

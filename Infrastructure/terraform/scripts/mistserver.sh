@@ -123,6 +123,9 @@ with open('/etc/mistserver.conf') as f:
 
 cfg.setdefault('config', {})['prometheus'] = '${PROMETHEUS_PASSPHRASE}'
 
+# Trust nginx loopback so PLAY_REWRITE sees real client IP via X-Real-IP header
+cfg['config']['trustedproxy'] = ['127.0.0.1']
+
 # Protocols: HTTP on 8080, HLS output, SRT ingest on configured port
 cfg['config']['protocols'] = [
     {"connector": "HTTP",  "online": 1, "port": 8080},

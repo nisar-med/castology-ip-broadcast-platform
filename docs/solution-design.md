@@ -599,12 +599,29 @@ journalctl -t mist-srt-auth -f
 
 1. Create `affiliates` record in PocketBase with `token_key`, `active=true`
 2. Create one or more active `affiliate_clients` rows with `stream`, `allowed_ips`, and optional `is_test_client`
-2. Add token to Cloudflare KV for `/live/` R2 delivery:
+   - If IP is unknown at onboarding time, use `allowed_ips: 0.0.0.0/0` as a temporary wildcard and update once confirmed
+   - `affiliate_clients` rows are **required** — auth will deny even with a valid token if no matching client row exists
+3. Add token to Cloudflare KV for `/live/` R2 delivery:
 ```bash
 curl -X PUT "https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/storage/kv/namespaces/{KV_ID}/values/{token}" \
   -H "Authorization: Bearer {CF_TOKEN}" \
   -d '{"affiliate":"Storm Fiber","streams":["geo+news","geo+ent"]}'
 ```
+
+### QA: verify affiliate endpoints after onboarding
+
+Run these from an **external machine** (not the VPS) so that IP whitelisting is exercised end-to-end.
+
+```bash
+# SRT — expects stream info if auth passes
+ffprobe -v quiet -print_format json -show_streams \
+  "srt://83.147.18.124:1234?streamid=geo+news/<token_key>"
+
+# HLS — expects a valid #EXTM3U playlist if auth passes
+curl -v "http://play.castology.tv/hls/geo+news/index.m3u8?token=<token_key>"
+```
+
+> **Note:** HLS must use the domain `play.castology.tv`, not the raw VPS IP. MistServer only serves HLS when the `Host` header matches — raw IP requests return the MistServer web UI instead of the playlist.
 
 ### Check upload pipeline manually
 

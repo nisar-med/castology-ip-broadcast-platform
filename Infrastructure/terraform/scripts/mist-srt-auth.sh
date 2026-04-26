@@ -23,6 +23,12 @@ if [[ "$connector" != "TSSRT" && "$connector" != "HLS" ]]; then
     exit 0
 fi
 
+# Pass loopback through — ffmpeg writer and internal MistServer sub-requests
+if [[ "$client_ip" == "127.0.0.1" || "$client_ip" == "::1" ]]; then
+    printf '%s' "$stream"
+    exit 0
+fi
+
 if [[ "$connector" == "HLS" ]]; then
     sname="$stream"
     if echo "$request_url" | grep -q 'tkn='; then
