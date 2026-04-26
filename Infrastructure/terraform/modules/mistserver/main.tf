@@ -111,6 +111,65 @@ resource "null_resource" "provision_stream_auth" {
       "chmod +x /usr/local/bin/cast-mist-stream-auth.sh",
       "printf 'PB_URL=http://127.0.0.1:8090\\nPB_EMAIL=${var.pb_email}\\nPB_PASS=${var.pb_password}\\n' > /etc/cast-mist-stream-auth.env",
       "chmod 600 /etc/cast-mist-stream-auth.env",
+      "rm -f /usr/local/bin/mist-srt-auth.sh /etc/mist-auth.env",
+    ]
+  }
+
+  depends_on = [null_resource.provision]
+}
+
+resource "null_resource" "provision_r2_writer" {
+  triggers = {
+    script = filemd5("${path.module}/../../scripts/cast-r2-writer")
+    vps_ip = var.vps_ip
+  }
+
+  connection {
+    type        = "ssh"
+    host        = var.vps_ip
+    user        = "root"
+    private_key = file(var.ssh_private_key_path)
+    timeout     = "10m"
+  }
+
+  provisioner "file" {
+    source      = "${path.module}/../../scripts/cast-r2-writer"
+    destination = "/usr/local/bin/cast-r2-writer"
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "chmod +x /usr/local/bin/cast-r2-writer",
+      "rm -f /usr/local/bin/mist-r2-writer /etc/mist-r2-writer.env",
+    ]
+  }
+
+  depends_on = [null_resource.provision]
+}
+
+resource "null_resource" "provision_stream_probe" {
+  triggers = {
+    script = filemd5("${path.module}/../../scripts/cast-stream-probe.sh")
+    vps_ip = var.vps_ip
+  }
+
+  connection {
+    type        = "ssh"
+    host        = var.vps_ip
+    user        = "root"
+    private_key = file(var.ssh_private_key_path)
+    timeout     = "10m"
+  }
+
+  provisioner "file" {
+    source      = "${path.module}/../../scripts/cast-stream-probe.sh"
+    destination = "/usr/local/bin/cast-stream-probe.sh"
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "chmod +x /usr/local/bin/cast-stream-probe.sh",
+      "rm -f /usr/local/bin/mist-ts-monitor.sh /usr/local/bin/mist-writer-test.sh",
     ]
   }
 

@@ -23,8 +23,8 @@ Encoder (OBS/vMix)                      Affiliate STB/IRD/Player
  └─────┬───────┘                     │  index.m3u8  │                                   │
        │                             └──────┬───────┘                                   │
        │ PLAY_REWRITE trigger               │ local disk                                │
-       │ /opt/mist-scripts/                 ▼                                           │
-       │ mist-srt-auth.sh       /var/lib/mist-hls/{stream}/                            ▼
+       │ /usr/local/bin/                 ▼                                           │
+       │ cast-mist-stream-auth.sh       /var/lib/mist-hls/{stream}/                            ▼
        │ validates token+IP              seg_NNNNN.ts                        HLS player
        │ via PocketBase                  index.m3u8                  https://play.castology.tv
        ▼                                     │ boto3 parallel upload         /hls/{stream}/
@@ -53,7 +53,7 @@ Encoder (OBS/vMix)                      Affiliate STB/IRD/Player
 
 | Role | IP | Services |
 |---|---|---|
-| Streaming | 83.147.18.124 | MistServer, mist-exporter, ffmpeg, boto3 seg-push, nginx |
+| Streaming | 83.147.18.124 | MistServer, cast-prom-metrics, ffmpeg, boto3 seg-push, nginx |
 | Monitoring | 83.147.18.124 (same VPS) | Prometheus, Grafana, PocketBase, nginx |
 
 Both roles currently share one VPS. The Terraform `vps` map supports different IPs; split is straightforward if load grows.
@@ -124,11 +124,11 @@ ffmpeg -i {stream_url} -c copy -f hls \
 - `append_list`: playlist is append-only; old entries roll off the window but segment files remain on disk until the cleanup timer runs
 - Segments are immutable once written; only `index.m3u8` changes
 
-Managed by systemd unit `mist-hls-writer-{safe-name}` with `Restart=always`.
+Managed by systemd unit `cast-hls-write-{safe-name}` with `Restart=always`.
 
 ### 4.3 R2 Upload — boto3 Parallel Push
 
-A Python script (`mist-seg-push-{safe-name}.py`) runs as a systemd service, polling every 1 second:
+A Python script (`cast-hls-push-{safe-name}.py`) runs as a systemd service, polling every 1 second:
 
 1. Reads `index.m3u8` to get the current segment list
 2. Finds segments not yet in its `uploaded` set
@@ -152,7 +152,7 @@ No code change required — Local Uploads is transparent at the S3 API layer.
 
 ### 4.5 R2 Cleanup
 
-A systemd timer (`mist-r2-cleanup-{safe-name}.timer`) runs every 30 minutes and executes:
+A systemd timer (`cast-hls-clean-{safe-name}.timer`) runs every 30 minutes and executes:
 
 ```bash
 rclone delete r2:castology-hls/live/{stream} --min-age=2h --include="*.ts" --log-level=ERROR
@@ -173,9 +173,9 @@ Affiliates (cable operators, streaming services) are authenticated on every new 
 
 Both SRT and HLS connections use the same trigger script and the same PocketBase data.
 
-### 5.2 PLAY_REWRITE Trigger — mist-srt-auth.sh
+### 5.2 PLAY_REWRITE Trigger — cast-mist-stream-auth.sh
 
-MistServer calls `/opt/mist-scripts/mist-srt-auth.sh` for every new session. The script:
+MistServer calls `/usr/local/bin/cast-mist-stream-auth.sh` for every new session. The script:
 
 1. Reads 4 lines from stdin: `stream`, `client_ip`, `connector`, `request_url`
 2. For **TSSRT**: parses token from streamid (`geo+news/TOKEN`)
@@ -186,12 +186,12 @@ MistServer calls `/opt/mist-scripts/mist-srt-auth.sh` for every new session. The
 7. Checks source IP against the matched client row's `allowed_ips` (or `client_name` when used as a single-IP value)
 8. Returns the real stream name on success (e.g. `geo+news`), exits 1 on denial
 
-Logs to systemd journal as `mist-srt-auth`. Monitor with:
+Logs to systemd journal as `cast-mist-stream-auth`. Monitor with:
 ```bash
-journalctl -t mist-srt-auth -f
+journalctl -t cast-mist-stream-auth -f
 ```
 
-Credentials are stored in `/etc/mist-auth.env` (chmod 600), not in the script.
+Credentials are stored in `/etc/cast-mist-stream-auth.env` (chmod 600), not in the script.
 
 ### 5.3 SRT Output — Affiliate Pull
 
@@ -288,13 +288,13 @@ R2-backed HLS delivery for `/live/` paths is gated through a Cloudflare Worker.
 
 | Target | Metrics |
 |---|---|
-| `mist-exporter:9101` | Castology session status, broadcaster feed status, affiliate client status, R2 pipeline health |
+| `cast-prom-metrics:9101` | Castology session status, broadcaster feed status, affiliate client status, R2 pipeline health |
 | `mistserver:4242/prometheus?pass={passphrase}` | MistServer internal metrics |
 | `node-exporter:9100` | VPS system metrics (CPU, RAM, disk, network) |
 
 The exporter port 9101 is firewalled to `127.0.0.1` only; Prometheus scrapes via localhost. MistServer API port 4242 is firewalled to `127.0.0.1` only.
 
-### 6.2 mist-exporter Metrics
+### 6.2 cast-prom-metrics Metrics
 
 **Broadcaster ingest / feed status:**
 
@@ -319,7 +319,7 @@ Test clients (`is_test_client=true`) are excluded from affiliate summary monitor
 
 | Metric | Type | Description |
 |---|---|---|
-| `r2_ffmpeg_up` | Gauge | 1 = `mist-hls-writer-*` service active |
+| `r2_ffmpeg_up` | Gauge | 1 = `cast-hls-write-*` service active |
 | `r2_segment_lag_count` | Gauge | Local segments not yet in R2 |
 | `r2_latest_segment_age_seconds` | Gauge | Age of most recent local segment |
 | `r2_upload_errors_total` | Counter | Upload errors from seg-push service |
@@ -346,23 +346,23 @@ Every persistent process on the VPS is a systemd unit. All units are installed a
 | Unit name | Type | Binary / script | Port(s) | Restart | Provisioned by |
 |---|---|---|---|---|---|
 | `mistserver` | simple | `/usr/bin/MistController` | 8080 (HTTP), 4242 (API), 1234+1235 (SRT) | always | `module.mistserver` → `mistserver.sh` |
-| `mist-hls-writer-geo-ent` | simple | `/usr/local/bin/mist-hls-writer-geo-ent.sh` → `ffmpeg` | — | always, 3s | `null_resource.mistserver_r2_push` → `mistserver-r2-push.sh` |
-| `mist-hls-writer-geo-news` | simple | `/usr/local/bin/mist-hls-writer-geo-news.sh` → `ffmpeg` | — | always, 3s | `null_resource.mistserver_r2_push` → `mistserver-r2-push.sh` |
-| `mist-seg-push-geo-ent` | simple | `/usr/bin/python3 /usr/local/bin/mist-seg-push-geo-ent.py` | — | always, 2s | `null_resource.mistserver_r2_push` → `mistserver-r2-push.sh` |
-| `mist-seg-push-geo-news` | simple | `/usr/bin/python3 /usr/local/bin/mist-seg-push-geo-news.py` | — | always, 2s | `null_resource.mistserver_r2_push` → `mistserver-r2-push.sh` |
-| `mist-r2-cleanup-geo-ent.timer` | timer | triggers `.service` below | — | every 2 min | `null_resource.mistserver_r2_push` → `mistserver-r2-push.sh` |
-| `mist-r2-cleanup-geo-ent.service` | oneshot | `/usr/bin/python3 /usr/local/bin/mist-r2-cleanup-geo-ent.py` | — | — | `null_resource.mistserver_r2_push` → `mistserver-r2-push.sh` |
-| `mist-r2-cleanup-geo-news.timer` | timer | triggers `.service` below | — | every 2 min | `null_resource.mistserver_r2_push` → `mistserver-r2-push.sh` |
-| `mist-r2-cleanup-geo-news.service` | oneshot | `/usr/bin/python3 /usr/local/bin/mist-r2-cleanup-geo-news.py` | — | — | `null_resource.mistserver_r2_push` → `mistserver-r2-push.sh` |
-| `mist-exporter` | simple | `/usr/bin/python3 /usr/local/bin/mist-exporter.py` | 9101 | always, 5s | `module.mistserver` → `null_resource.provision_exporter` → `mist-exporter.sh` |
+| `cast-hls-write-geo-ent` | simple | `/usr/local/bin/cast-hls-write-geo-ent.sh` → `ffmpeg` | — | always, 3s | `null_resource.mistserver_r2_push` → `mistserver-r2-push.sh` |
+| `cast-hls-write-geo-news` | simple | `/usr/local/bin/cast-hls-write-geo-news.sh` → `ffmpeg` | — | always, 3s | `null_resource.mistserver_r2_push` → `mistserver-r2-push.sh` |
+| `cast-hls-push-geo-ent` | simple | `/usr/bin/python3 /usr/local/bin/cast-hls-push-geo-ent.py` | — | always, 2s | `null_resource.mistserver_r2_push` → `mistserver-r2-push.sh` |
+| `cast-hls-push-geo-news` | simple | `/usr/bin/python3 /usr/local/bin/cast-hls-push-geo-news.py` | — | always, 2s | `null_resource.mistserver_r2_push` → `mistserver-r2-push.sh` |
+| `cast-hls-clean-geo-ent.timer` | timer | triggers `.service` below | — | every 2 min | `null_resource.mistserver_r2_push` → `mistserver-r2-push.sh` |
+| `cast-hls-clean-geo-ent.service` | oneshot | `/usr/bin/python3 /usr/local/bin/cast-hls-clean-geo-ent.py` | — | — | `null_resource.mistserver_r2_push` → `mistserver-r2-push.sh` |
+| `cast-hls-clean-geo-news.timer` | timer | triggers `.service` below | — | every 2 min | `null_resource.mistserver_r2_push` → `mistserver-r2-push.sh` |
+| `cast-hls-clean-geo-news.service` | oneshot | `/usr/bin/python3 /usr/local/bin/cast-hls-clean-geo-news.py` | — | — | `null_resource.mistserver_r2_push` → `mistserver-r2-push.sh` |
+| `cast-prom-metrics` | simple | `/usr/bin/python3 /usr/local/bin/cast-prom-metrics.py` | 9101 | always, 5s | `module.mistserver` → `null_resource.provision_exporter` → `cast-prom-metrics-install.sh` |
 | `nginx` | forking | `/usr/sbin/nginx` | 80 | always | `module.nginx` → `nginx.sh` |
 
 **Stream-per-service naming:** Stream names use `+` (e.g. `geo+ent`). Systemd unit names replace all non-alphanumeric characters with `-` → `geo-ent`, `geo-news`. The safe name is derived once in `mistserver-r2-push.sh` as `SAFE_NAME="${STREAM_NAME//[^a-zA-Z0-9]/-}"`.
 
 **`After=` dependencies:**
-- `mist-hls-writer-*` → `mistserver.service` (waits for MistServer HTTP port to be ready)
-- `mist-seg-push-*` → `mist-hls-writer-*.service` (waits for first segments to appear)
-- `mist-exporter` → `mistserver.service`
+- `cast-hls-write-*` → `mistserver.service` (waits for MistServer HTTP port to be ready)
+- `cast-hls-push-*` → `cast-hls-write-*.service` (waits for first segments to appear)
+- `cast-prom-metrics` → `mistserver.service`
 
 ### 7.2 Monitoring VPS Services
 
@@ -408,17 +408,17 @@ main.tf
 │   │                                  enables: mistserver.service
 │   │                                  groups:  castology-streaming.target
 │   └── null_resource.provision_exporter
-│       └── mist-exporter.sh        → installs Python exporter
-│                                      enables: mist-exporter.service
+│       └── cast-prom-metrics-install.sh        → installs Python exporter
+│                                      enables: cast-prom-metrics.service
 │                                      groups:  castology-streaming.target
 │
 ├── null_resource.mistserver_r2_push  (main.tf — runs per stream_name)
 │   └── mistserver-r2-push.sh       → installs ffmpeg, boto3
 │                                      enables / groups (per stream):
-│                                        mist-hls-writer-{safe}.service
-│                                        mist-seg-push-{safe}.service
-│                                        mist-r2-cleanup-{safe}.timer
-│                                        mist-r2-cleanup-{safe}.service
+│                                        cast-hls-write-{safe}.service
+│                                        cast-hls-push-{safe}.service
+│                                        cast-hls-clean-{safe}.timer
+│                                        cast-hls-clean-{safe}.service
 │
 ├── module.monitoring         (modules/monitoring/main.tf)
 │   └── monitoring.sh               → installs Prometheus + Grafana
@@ -450,8 +450,8 @@ Each `null_resource` has a `triggers` block. Terraform re-runs the provisioner o
 | Resource | Triggers re-provision when... |
 |---|---|
 | `module.mistserver / null_resource.provision` | `mistserver.sh` changes, VPS IP changes, Prometheus passphrase changes |
-| `module.mistserver / null_resource.provision_exporter` | `mist-exporter.sh` changes, `mist-exporter.py` changes, port config changes |
-| `module.mistserver / null_resource.provision_srt_auth` | `mist-srt-auth.sh` changes, PocketBase email/password changes |
+| `module.mistserver / null_resource.provision_exporter` | `cast-prom-metrics-install.sh` changes, `cast-prom-metrics.py` changes, port config changes |
+| `module.mistserver / null_resource.provision_stream_auth` | `cast-mist-stream-auth.sh` changes, PocketBase email/password changes |
 | `null_resource.mistserver_r2_push` | `mistserver-r2-push.sh` changes, R2 endpoint/bucket/key changes, stream list changes |
 | `module.monitoring / null_resource.provision` | `monitoring.sh` changes, scrape IP changes |
 | `module.pocketbase / null_resource.provision` | `pocketbase.sh` changes, admin email changes |
@@ -464,28 +464,28 @@ Files written to the VPS outside of systemd unit files:
 | Path | Written by | Purpose |
 |---|---|---|
 | `/etc/mistserver.conf` | `mistserver.sh` (Python inline) | MistServer protocols, stream config, Prometheus passphrase |
-| `/etc/mist-auth.env` | `mistserver` module `provision_srt_auth` | PocketBase credentials for `mist-srt-auth.sh` (chmod 600) |
-| `/opt/mist-scripts/mist-srt-auth.sh` | `mistserver` module `provision_srt_auth` | PLAY_REWRITE trigger: validates affiliate token + active affiliate client IP |
-| `/etc/mist-exporter.env` | `mist-exporter.sh` | `STREAMS_JSON`, `EXPORTER_PORT`, `MIST_API_PORT` — read by `mist-exporter.service` via `EnvironmentFile=` |
-| `/etc/prometheus/prometheus.yml` | `monitoring.sh` | Scrape targets (MistServer + mist-exporter) |
+| `/etc/cast-mist-stream-auth.env` | `mistserver` module `provision_stream_auth` | PocketBase credentials for `cast-mist-stream-auth.sh` (chmod 600) |
+| `/usr/local/bin/cast-mist-stream-auth.sh` | `mistserver` module `provision_stream_auth` | PLAY_REWRITE trigger: validates affiliate token + active affiliate client IP |
+| `/etc/cast-prom-metrics.env` | `cast-prom-metrics-install.sh` | `STREAMS_JSON`, `EXPORTER_PORT`, `MIST_API_PORT` — read by `cast-prom-metrics.service` via `EnvironmentFile=` |
+| `/etc/prometheus/prometheus.yml` | `monitoring.sh` | Scrape targets (MistServer + cast-prom-metrics) |
 | `/root/.config/rclone/rclone.conf` | `mistserver-r2-push.sh` | R2 credentials for cleanup timer only |
-| `/usr/local/bin/mist-hls-writer-{safe}.sh` | `mistserver-r2-push.sh` | Wrapper: resolves sub-playlist URL, strips token, execs ffmpeg |
-| `/usr/local/bin/mist-seg-push-{safe}.py` | `mistserver-r2-push.sh` | boto3 parallel uploader (segments + playlist) |
-| `/usr/local/bin/mist-exporter.py` | `mist-exporter.sh` | Prometheus exporter (copied from `/tmp/` uploaded by Terraform) |
+| `/usr/local/bin/cast-hls-write-{safe}.sh` | `mistserver-r2-push.sh` | Wrapper: resolves sub-playlist URL, strips token, execs ffmpeg |
+| `/usr/local/bin/cast-hls-push-{safe}.py` | `mistserver-r2-push.sh` | boto3 parallel uploader (segments + playlist) |
+| `/usr/local/bin/cast-prom-metrics.py` | `cast-prom-metrics-install.sh` | Prometheus exporter (copied from `/tmp/` uploaded by Terraform) |
 | `/var/www/onboard/index.html` | `pocketbase.sh` | Placeholder page (affiliate portal not yet implemented) |
 | `/opt/pocketbase/` | `pocketbase.sh` | PocketBase binary + data directory |
 | `/var/lib/mist-hls/{stream}/` | `mistserver-r2-push.sh` (mkdir) | HLS segment working directory |
 
 ---
 
-## 9. mist-exporter Architecture
+## 9. cast-prom-metrics Architecture
 
-`mist-exporter.py` runs alongside MistServer and polls:
+`cast-prom-metrics.py` runs alongside MistServer and polls:
 
 - Mist `/api {"clients": {"time": -3}}`
 - Mist `/api {"active_streams": null}`
 - PocketBase collections: `broadcasters`, `broadcaster_feeds`, `affiliates`, `affiliate_clients`
-- recent `mist-srt-auth` journal entries for token-aware affiliate attribution
+- recent `cast-mist-stream-auth` journal entries for token-aware affiliate attribution
 
 It emits:
 
@@ -552,7 +552,7 @@ Affiliate `token_key` values in PocketBase are static. There is no token expiry 
 
 ### 10.5 HLS Auth Tied to MistServer Session Token
 
-For HLS connections, sub-playlist and segment requests use MistServer's internal `?tkn=` session token, not the affiliate token. The `mist-srt-auth.sh` script passes `?tkn=` requests through without re-validating against PocketBase. If an `affiliate_clients` row is disabled or removed, existing HLS playback can continue until the Mist `tkn` session expires. New connections will be denied immediately.
+For HLS connections, sub-playlist and segment requests use MistServer's internal `?tkn=` session token, not the affiliate token. The `cast-mist-stream-auth.sh` script passes `?tkn=` requests through without re-validating against PocketBase. If an `affiliate_clients` row is disabled or removed, existing HLS playback can continue until the Mist `tkn` session expires. New connections will be denied immediately.
 
 ### 10.5 Grafana Not Behind Auth Proxy
 
@@ -564,8 +564,8 @@ Grafana on port 3000 is accessible from `83.147.18.124/32` only (firewall rule).
 
 ### Stream is down (VLC returns 404 or stops playing)
 
-1. Check `r2_ffmpeg_up` in Grafana — if 0, `systemctl restart mist-hls-writer-{safe}`
-2. Check `r2_segment_lag_count` — if rising, check `journalctl -u mist-seg-push-{safe} -n 50`
+1. Check `r2_ffmpeg_up` in Grafana — if 0, `systemctl restart cast-hls-write-{safe}`
+2. Check `r2_segment_lag_count` — if rising, check `journalctl -u cast-hls-push-{safe} -n 50`
 3. Check `mist_broadcaster_feed_status` — if 0, upstream encoder is not pushing that broadcaster feed
 4. Check `mist_broadcaster_feed_loss` / `mist_broadcaster_feed_jitter_ms` — if elevated, upstream or transport quality is degraded
 
@@ -586,13 +586,13 @@ terraform apply -target=null_resource.mistserver_r2_push
 
 ```bash
 # Watch auth decisions in real time
-journalctl -t mist-srt-auth -f
+journalctl -t cast-mist-stream-auth -f
 
 # Common DENY reasons:
 # DENY: no token in '...'                     → streamid missing /TOKEN or ?token= param
 # DENY: no active affiliate for token=X       → token not in PocketBase or active=false
 # DENY: IP x.x.x.x not authorized via affiliate_clients → no active client row for that affiliate+stream+IP
-# ERROR: PocketBase auth failed               → check /etc/mist-auth.env credentials
+# ERROR: PocketBase auth failed               → check /etc/cast-mist-stream-auth.env credentials
 ```
 
 ### Add an affiliate (SRT + HLS)
@@ -627,8 +627,8 @@ curl -v "http://play.castology.tv/hls/geo+news/index.m3u8?token=<token_key>"
 
 ```bash
 # On streaming VPS
-journalctl -u mist-seg-push-geo-ent -f
-journalctl -u mist-hls-writer-geo-ent -f
+journalctl -u cast-hls-push-geo-ent -f
+journalctl -u cast-hls-write-geo-ent -f
 ls -lth /var/lib/mist-hls/geo+ent/ | head -5
 curl -s localhost:9101/metrics | grep r2_
 ```
@@ -643,7 +643,7 @@ curl -s localhost:9101/metrics | grep r2_
 
 **Check auth log:**
 ```bash
-journalctl -t mist-srt-auth -f
+journalctl -t cast-mist-stream-auth -f
 ```
 
 | Log message | Cause | Fix |
@@ -651,7 +651,7 @@ journalctl -t mist-srt-auth -f
 | `DENY: no token in 'geo+news'` | Streamid missing `/TOKEN` | Use `streamid=geo+news/TOKEN` |
 | `DENY: no active affiliate for token=X` | Token not in PocketBase or `active=false` | Check PocketBase `affiliates` collection |
 | `DENY: IP x.x.x.x not authorized via affiliate_clients` | No active client row matches that affiliate + stream + IP | Add or enable the matching `affiliate_clients` row |
-| `ERROR: PocketBase auth failed` | Wrong credentials in `/etc/mist-auth.env` | Update `/etc/mist-auth.env` on VPS |
+| `ERROR: PocketBase auth failed` | Wrong credentials in `/etc/cast-mist-stream-auth.env` | Update `/etc/cast-mist-stream-auth.env` on VPS |
 
 **Check MistServer log:**
 ```bash
@@ -672,7 +672,7 @@ journalctl -u mistserver -f | grep -E "FAIL|ACCS|PLAY_REWRITE"
 - Token value in KV is malformed JSON — must be `{"affiliate":"Name","streams":["geo+news",...]}`
 
 **For `/hls/` path** (MistServer direct):
-- Check auth log: `journalctl -t mist-srt-auth -f`
+- Check auth log: `journalctl -t cast-mist-stream-auth -f`
 - Verify token is correct and IP is in `allowed_ips`
 - Verify `stream.castology.tv` nginx site is active: `nginx -T | grep stream.castology.tv`
 
@@ -694,8 +694,8 @@ The returned URLs should contain `?tkn=`. The trigger script passes `tkn=` reque
 
 ```bash
 # Check R2 pipeline services
-journalctl -u mist-hls-writer-geo-news -f
-journalctl -u mist-seg-push-geo-news -f
+journalctl -u cast-hls-write-geo-news -f
+journalctl -u cast-hls-push-geo-news -f
 
 # Check latest segment age
 ls -lth /var/lib/mist-hls/geo+news/ | head -5
@@ -704,7 +704,7 @@ ls -lth /var/lib/mist-hls/geo+news/ | head -5
 curl -s localhost:9101/metrics | grep r2_
 ```
 
-- `r2_ffmpeg_up 0` → `systemctl restart mist-hls-writer-geo-news`
+- `r2_ffmpeg_up 0` → `systemctl restart cast-hls-write-geo-news`
 - `r2_segment_lag_count` rising → upload backlog, check seg-push logs
 - No segments on disk → MistServer not receiving ingest, check encoder
 

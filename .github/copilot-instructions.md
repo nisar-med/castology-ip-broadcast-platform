@@ -22,7 +22,7 @@ There is no in-repo automated test suite or per-test runner today. Targeted `ter
 
 The main control plane is `Infrastructure/terraform/main.tf`. It wires Cloudflare resources and VPS provisioning together with Terraform modules plus `null_resource` + SSH `remote-exec` scripts. `local.unique_vps` deduplicates shared IPs, so nginx and firewall config are merged per unique server even when `streaming` and `monitoring` point at the same host.
 
-MistServer is provisioned by `modules/mistserver` and `scripts/mistserver.sh`. It accepts SRT ingest on port `1235`, exposes HLS on `:8080`, and creates a wildcard `geo` push source so encoders can publish streams like `geo+news`. The same module also installs the Prometheus exporter and the `PLAY_REWRITE` auth hook in `scripts/mist-srt-auth.sh`.
+MistServer is provisioned by `modules/mistserver` and `scripts/mistserver.sh`. It accepts SRT ingest on port `1235`, exposes HLS on `:8080`, and creates a wildcard `geo` push source so encoders can publish streams like `geo+news`. The same module also installs the Prometheus exporter and the `PLAY_REWRITE` auth hook in `scripts/cast-mist-stream-auth.sh`.
 
 Delivery has two distinct paths that must not be conflated:
 
@@ -45,7 +45,7 @@ All Castology scripts are prefixed `cast-` and deploy to `/usr/local/bin/` on th
 
 | Source script | VPS path | Deployed by | Consumer |
 |---------------|----------|-------------|----------|
-| `cast-prom-metrics.py` | `/usr/local/bin/cast-prom-metrics.py` | `mist-exporter.sh` (via `/tmp/`) | `cast-prom-metrics.service` |
+| `cast-prom-metrics.py` | `/usr/local/bin/cast-prom-metrics.py` | `cast-prom-metrics-install.sh` (via `/tmp/`) | `cast-prom-metrics.service` |
 | `cast-mist-stream-auth.sh` | `/usr/local/bin/cast-mist-stream-auth.sh` | Terraform file provisioner | MistServer `PLAY_REWRITE` trigger |
 | *(generated)* | `/usr/local/bin/cast-hls-write-{safe}.sh` | `mistserver-r2-push.sh` | `cast-hls-write-{safe}.service` |
 | *(generated)* | `/usr/local/bin/cast-hls-push-{safe}.py` | `mistserver-r2-push.sh` | `cast-hls-push-{safe}.service` |
@@ -63,18 +63,18 @@ scp -i ~/.ssh/id_ed25519 cast-mist-stream-auth.sh root@83.147.18.124:/usr/local/
 
 ## Key conventions
 
-- Stream names use `+` as a meaningful separator: `geo+news`, `geo+ent`. Do not replace `+` with `-` in real stream identifiers. Hyphenated names are only for derived safe names like systemd units (`mist-hls-writer-geo-news`).
+- Stream names use `+` as a meaningful separator: `geo+news`, `geo+ent`. Do not replace `+` with `-` in real stream identifiers. Hyphenated names are only for derived safe names like systemd units (`cast-hls-write-geo-news`).
 - Keep the Worker path and MistServer-origin path aligned when changing auth or playback behavior. `/live/*` uses Cloudflare KV + R2; `/hls/*` uses MistServer `PLAY_REWRITE`.
 - `cast-mist-stream-auth.sh` restores `+` after MistServer decodes it as a space, reads affiliate tokens from `token_key`, and allows HLS sub-requests with `?tkn=` to pass through without revalidation. Preserve that behavior unless you are intentionally changing session handling.
 - The ffmpeg wrapper in `mistserver-r2-push.sh` fetches the master playlist from localhost, extracts the track playlist, and strips MistServer's rotating `?tkn=` token before handing the URL to ffmpeg. That token-stripping is required so long-running ffmpeg jobs survive token rotation.
 - Use PocketBase `affiliates` fields `token_key`, `streams`, `allowed_ips`, and `active` for viewer/operator authorization. Older notes about `channel_groups` or `cable_operators` are stale.
 - Worker KV values are JSON shaped like `{"affiliate":"Name","streams":["geo+news","geo+ent"]}`. If you change token payload structure, update both the Worker and any onboarding/runbook docs.
 - Provisioning is script-driven and idempotent. Most Terraform resources re-run because of `filemd5(...)` trigger changes in the shell/Python scripts, not because of cloud-init or image baking.
-- Secrets belong in Terraform sensitive variables or deployed env files such as `/etc/mist-auth.env` and `/etc/mist-exporter.env`, never in checked-in scripts.
+- Secrets belong in Terraform sensitive variables or deployed env files such as `/etc/cast-mist-stream-auth.env` and `/etc/cast-prom-metrics.env`, never in checked-in scripts.
 - MistServer API and PocketBase admin are intentionally accessed through SSH tunnels rather than public nginx routes. Preserve that access model unless the infrastructure design changes.
 - The root Terraform defaults and `terraform.tfvars.example` still show `geo-news`/`geo-ent` in some places, but the active MistServer/Worker/auth flow uses `geo+...` names. Treat `+` naming as authoritative unless you are intentionally performing a repo-wide migration.
 
 ## Reference docs
 
 - `docs/solution-design.md` is the best high-level system overview and operational runbook.
-- `docs/mistserver-api.md` documents the MistServer API shapes used by `scripts/mist-exporter.py`.
+- `docs/mistserver-api.md` documents the MistServer API shapes used by `scripts/cast-prom-metrics.py`.

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # MistServer PLAY_REWRITE trigger — SRT token auth via PocketBase
 
-log() { logger -t mist-srt-auth "$*"; }
+log() { logger -t cast-mist-stream-auth "$*"; }
 PB_URL="${PB_URL:-http://127.0.0.1:8090}"
 PB_EMAIL="${PB_EMAIL:-admin@castology.tv}"
-[[ -f /etc/mist-auth.env ]] && source /etc/mist-auth.env
+[[ -f /etc/cast-mist-stream-auth.env ]] && source /etc/cast-mist-stream-auth.env
 PB_PASS="${PB_PASS:-}"
 
 IFS= read -r stream

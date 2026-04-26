@@ -133,6 +133,16 @@ cfg['config']['protocols'] = [
     {"connector": "TSSRT", "online": 1, "port": ${SRT_INGEST_PORT}},
 ]
 
+# PLAY_REWRITE trigger — SRT + HLS stream authentication
+cfg['config'].setdefault('triggers', {})['PLAY_REWRITE'] = [
+    {"handler": "/usr/local/bin/cast-mist-stream-auth.sh", "streams": [], "sync": True}
+]
+
+# External R2 writer
+cfg['config']['externalwriters'] = [
+    {"cmdline": "/usr/local/bin/cast-r2-writer", "name": "R2 Writer", "protocols": ["r2"]}
+]
+
 # Wildcard stream — accepts any push with geo+ prefix
 cfg.setdefault('streams', {})['geo'] = {
     "name": "geo",
