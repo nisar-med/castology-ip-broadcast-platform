@@ -15,13 +15,14 @@ IFS= read -r request_url
 stream=$(echo "$stream" | sed 's/ /+/g')
 client_ip=$(echo "$client_ip" | sed 's/\[//g; s/\]//g; s/::ffff://g; s/:[0-9]*$//')
 
-log "connector=$connector ip=$client_ip stream=$stream"
-
-# Pass unknown connectors through
+# Pass unknown connectors through without logging
 if [[ "$connector" != "TSSRT" && "$connector" != "HLS" ]]; then
     printf '%s' "$stream"
     exit 0
 fi
+
+# Only log SRT requests at request level; HLS is too chatty (playlist poll every ~2s)
+[[ "$connector" == "TSSRT" ]] && log "connector=$connector ip=$client_ip stream=$stream"
 
 # Pass loopback through — ffmpeg writer and internal MistServer sub-requests
 if [[ "$client_ip" == "127.0.0.1" || "$client_ip" == "::1" ]]; then
