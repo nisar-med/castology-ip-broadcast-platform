@@ -49,11 +49,11 @@ HEALTH_POLL_SECS  = 60
 R2_POLL_SECS      = 5
 HLS_BASE_DIR      = "/var/lib/mist-hls"
 CLIENTS_LOOKBACK_SECS = int(os.environ.get("CLIENTS_LOOKBACK_SECS", "3"))
-AUTH_LOG_LOOKBACK_SECS = int(os.environ.get("AUTH_LOG_LOOKBACK_SECS", "86400"))
-AUTH_LOG_MAX_LINES = int(os.environ.get("AUTH_LOG_MAX_LINES", "500"))
 # An HLS session is considered online if it has an ALLOW: log entry within this window.
 # HLS clients refetch the playlist every 2–6 s, so 10 min covers transient gaps.
 HLS_SESSION_TIMEOUT_SECS = int(os.environ.get("HLS_SESSION_TIMEOUT_SECS", "600"))
+# Read auth log entries from the last HLS_SESSION_TIMEOUT_SECS window only — no line cap needed.
+AUTH_LOG_LOOKBACK_SECS = HLS_SESSION_TIMEOUT_SECS
 
 # Packet loss alert threshold — alert if lost/sent > this over the scrape window
 PACKET_LOSS_THRESHOLD = 0.02  # 2%
@@ -647,7 +647,6 @@ def _recent_affiliate_auth() -> dict[tuple[str, str], tuple[str, float]]:
                 "journalctl",
                 "-t", "mist-srt-auth",
                 "--since", cutoff,
-                "-n", str(AUTH_LOG_MAX_LINES),
                 "--no-pager",
                 "-o", "short-iso",
             ],
@@ -663,7 +662,7 @@ def _recent_affiliate_auth() -> dict[tuple[str, str], tuple[str, float]]:
     # short-iso line format: 2024-01-15T12:34:56+0000 hostname mist-srt-auth[pid]: MESSAGE
     ts_re = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{4})")
     allow_re = re.compile(
-        r"ALLOW: stream=(?P<stream>\S+) affiliate=(?P<affiliate>.+?) client=\S+ role=\S+ test_client=(?P<test_client>\S+) ip=(?P<ip>\S+)$"
+        r"ALLOW: stream=(?P<stream>\S+) affiliate=(?P<affiliate>.+?) client=(?P<client>.+?) role=\S+ test_client=(?P<test_client>\S+) ip=(?P<ip>\S+)$"
     )
     for line in result.stdout.splitlines():
         allow_match = allow_re.search(line)
@@ -904,6 +903,14 @@ def _check_health():
     # Check each affiliate client
     for stream in STREAM_NAMES:
         ignored_test_ips = _test_client_ips(stream, active_outputs.get(stream, set()), affiliate_clients)
+        # Don't suppress an IP if the auth log attributes it to a real (non-test) affiliate —
+        # e.g. a shared IP that is a test client for one affiliate but a real client for another.
+        auth_claimed_ips = {
+            ip
+            for (auth_stream, ip), (affiliate_name, _ts) in affiliate_auth.items()
+            if auth_stream == stream
+        }
+        ignored_test_ips -= auth_claimed_ips
         if ignored_test_ips:
             log.info("Ignoring test client sessions: stream=%s ips=%s", stream, ",".join(sorted(ignored_test_ips)))
         monitored_outputs = active_outputs.get(stream, set()) - ignored_test_ips
@@ -911,7 +918,7 @@ def _check_health():
         preferred_names = {
             ip: affiliate_name
             for (auth_stream, ip), (affiliate_name, _ts) in affiliate_auth.items()
-            if auth_stream == stream and ip not in ignored_test_ips
+            if auth_stream == stream
         }
         for g, ip in _assign_connected_ips(stream_groups, monitored_outputs, preferred_names=preferred_names):
             summary_key = (g["name"], stream)
