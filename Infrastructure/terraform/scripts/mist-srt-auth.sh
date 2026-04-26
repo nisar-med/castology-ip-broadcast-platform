@@ -21,9 +21,6 @@ if [[ "$connector" != "TSSRT" && "$connector" != "HLS" ]]; then
     exit 0
 fi
 
-# Only log SRT requests at request level; HLS is too chatty (playlist poll every ~2s)
-[[ "$connector" == "TSSRT" ]] && log "connector=$connector ip=$client_ip stream=$stream"
-
 # Pass loopback through — ffmpeg writer and internal MistServer sub-requests
 if [[ "$client_ip" == "127.0.0.1" || "$client_ip" == "::1" ]]; then
     printf '%s' "$stream"
@@ -33,6 +30,7 @@ fi
 if [[ "$connector" == "HLS" ]]; then
     sname="$stream"
     if echo "$request_url" | grep -q 'tkn='; then
+        # Internal MistServer segment request — already authenticated, pass silently
         printf '%s' "$sname"
         exit 0
     fi
