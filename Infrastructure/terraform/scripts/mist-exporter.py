@@ -8,6 +8,7 @@ sessions are connected. Flags unregistered sessions.
 Exposes metrics on port 9101 for Prometheus to scrape.
 """
 
+import datetime
 import json
 import ipaddress
 import os
@@ -50,6 +51,9 @@ HLS_BASE_DIR      = "/var/lib/mist-hls"
 CLIENTS_LOOKBACK_SECS = int(os.environ.get("CLIENTS_LOOKBACK_SECS", "3"))
 AUTH_LOG_LOOKBACK_SECS = int(os.environ.get("AUTH_LOG_LOOKBACK_SECS", "86400"))
 AUTH_LOG_MAX_LINES = int(os.environ.get("AUTH_LOG_MAX_LINES", "500"))
+# An HLS session is considered online if it has an ALLOW: log entry within this window.
+# HLS clients refetch the playlist every 2–6 s, so 10 min covers transient gaps.
+HLS_SESSION_TIMEOUT_SECS = int(os.environ.get("HLS_SESSION_TIMEOUT_SECS", "600"))
 
 # Packet loss alert threshold — alert if lost/sent > this over the scrape window
 PACKET_LOSS_THRESHOLD = 0.02  # 2%
@@ -321,6 +325,50 @@ def poll_pb_config():
         time.sleep(HEALTH_POLL_SECS)
 
 
+# ── MistServer process list session parser ────────────────────────────────────
+
+def _parse_mist_sessions() -> dict[str, dict[str, set]]:
+    """Parse MistSession processes from ps aux → SRT inputs and outputs.
+
+    Returns {"input": {stream: {ip,...}}, "output": {stream: {ip,...}}}
+    Session ID prefix: I=input (SRT ingest), O=output (SRT push-out).
+    HLS is handled statelessly by MistOutHTTP — no MistSession process is created.
+    """
+    result: dict[str, dict[str, set]] = {"input": {}, "output": {}}
+    try:
+        proc = subprocess.run(["ps", "aux"], capture_output=True, text=True, check=False)
+        for line in proc.stdout.splitlines():
+            if "MistSession" not in line:
+                continue
+            parts = line.split()
+            sess_idx = next((i for i, p in enumerate(parts) if "MistSession" in p), None)
+            if sess_idx is None:
+                continue
+            sess_id = parts[sess_idx + 1] if sess_idx + 1 < len(parts) else ""
+            args = parts[sess_idx + 1:]
+
+            stream = ip = ""
+            for i, a in enumerate(args):
+                if a == "--streamname" and i + 1 < len(args):
+                    stream = args[i + 1]
+                elif a == "--ip" and i + 1 < len(args):
+                    ip = args[i + 1]
+
+            if not stream or not ip:
+                continue
+            ip = ip.replace("::ffff:", "").strip("[]").split(":")[0]
+            if _is_loopback_ip(ip):
+                continue
+
+            if sess_id.startswith("I"):
+                result["input"].setdefault(stream, set()).add(ip)
+            elif sess_id.startswith("O"):
+                result["output"].setdefault(stream, set()).add(ip)
+    except Exception as e:
+        log.warning("ps aux MistSession parse error: %s", e)
+    return result
+
+
 # ── MistServer API helpers ────────────────────────────────────────────────────
 
 def mist_post(payload: dict) -> dict:
@@ -585,7 +633,13 @@ def _test_client_ips(stream: str, connected_ips: set[str], affiliate_clients: li
     return ignored
 
 
-def _recent_affiliate_auth() -> dict[tuple[str, str], str]:
+def _recent_affiliate_auth() -> dict[tuple[str, str], tuple[str, float]]:
+    """Read ALLOW: entries from the mist-srt-auth journal.
+
+    Returns {(stream, ip): (affiliate_name, last_seen_timestamp)} for all
+    entries within AUTH_LOG_LOOKBACK_SECS.  The caller uses last_seen_timestamp
+    to decide whether an HLS session is still active (within HLS_SESSION_TIMEOUT_SECS).
+    """
     cutoff = f"{AUTH_LOG_LOOKBACK_SECS} seconds ago"
     try:
         result = subprocess.run(
@@ -595,6 +649,7 @@ def _recent_affiliate_auth() -> dict[tuple[str, str], str]:
                 "--since", cutoff,
                 "-n", str(AUTH_LOG_MAX_LINES),
                 "--no-pager",
+                "-o", "short-iso",
             ],
             capture_output=True,
             text=True,
@@ -604,19 +659,42 @@ def _recent_affiliate_auth() -> dict[tuple[str, str], str]:
         log.warning("auth log read error: %s", e)
         return {}
 
-    assignments: dict[tuple[str, str], str] = {}
+    assignments: dict[tuple[str, str], tuple[str, float]] = {}
+    # short-iso line format: 2024-01-15T12:34:56+0000 hostname mist-srt-auth[pid]: MESSAGE
+    ts_re = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{4})")
+    allow_re = re.compile(
+        r"ALLOW: stream=(?P<stream>\S+) affiliate=(?P<affiliate>.+?) client=\S+ role=\S+ test_client=(?P<test_client>\S+) ip=(?P<ip>\S+)$"
+    )
     for line in result.stdout.splitlines():
-        match = re.search(
-            r"ALLOW: stream=(?P<stream>\S+) affiliate=(?P<affiliate>.+?)(?: client=\S+ role=\S+ test_client=\S+)? ip=(?P<ip>\S+)$",
-            line,
-        )
-        if not match:
+        allow_match = allow_re.search(line)
+        if not allow_match:
             continue
-        stream = match.group("stream").strip()
-        affiliate = match.group("affiliate").strip()
-        ip = match.group("ip").strip()
-        if stream and affiliate and ip:
-            assignments[(stream, ip)] = affiliate
+        if allow_match.group("test_client") == "true":
+            continue
+        stream = allow_match.group("stream").strip()
+        affiliate = allow_match.group("affiliate").strip()
+        ip = allow_match.group("ip").strip()
+        if not (stream and affiliate and ip):
+            continue
+
+        ts_match = ts_re.match(line)
+        if ts_match:
+            try:
+                ts_str = ts_match.group(1)
+                # Convert +0000 → +00:00 for Python 3.6 fromisoformat compat
+                if len(ts_str) > 19 and ts_str[19] in ("+", "-") and ":" not in ts_str[20:]:
+                    ts_str = ts_str[:22] + ":" + ts_str[22:]
+                dt = datetime.datetime.fromisoformat(ts_str)
+                ts = dt.timestamp()
+            except Exception:
+                ts = time.time()
+        else:
+            ts = time.time()
+
+        key = (stream, ip)
+        existing = assignments.get(key)
+        if existing is None or ts > existing[1]:
+            assignments[key] = (affiliate, ts)
 
     return assignments
 
@@ -669,10 +747,25 @@ def _check_health():
 
     fi = {f: i for i, f in enumerate(fields)} if fields else {}
 
-    # Build sets of what's actually connected
-    active_inputs: dict[str, set] = {}   # stream → set of IPs pushing in
-    active_outputs: dict[str, set] = {}  # stream → set of IPs pulling out
+    # --- Build active session sets from three sources ---
+    #
+    # Source 1: ps aux MistSession — authoritative for SRT ingest (I-prefix) and
+    #           SRT output (O-prefix).  HLS is stateless; no MistSession is created.
+    ps_sessions = _parse_mist_sessions()
+    active_inputs: dict[str, set] = {s: set(ips) for s, ips in ps_sessions["input"].items()}
+    active_outputs: dict[str, set] = {s: set(ips) for s, ips in ps_sessions["output"].items()}
 
+    # Source 2: mist-srt-auth ALLOW: journal — heartbeat for HLS viewers.
+    #           HLS clients refetch the playlist every 2-6 s, so a fresh ALLOW:
+    #           entry within HLS_SESSION_TIMEOUT_SECS means the session is live.
+    now = time.time()
+    affiliate_auth = _recent_affiliate_auth()
+    for (auth_stream, ip), (affiliate, last_seen) in affiliate_auth.items():
+        if now - last_seen <= HLS_SESSION_TIMEOUT_SECS:
+            active_outputs.setdefault(auth_stream, set()).add(ip)
+
+    # Source 3: /api clients — adds SRT sessions that ps may have missed (race
+    #           window at session start/end) and provides metrics (bytes, loss, uptime).
     for row in rows:
         if not isinstance(row, list) or not fi:
             continue
@@ -751,7 +844,8 @@ def _check_health():
 
     broadcaster_feed_defs = _build_broadcaster_feeds(broadcasters, broadcaster_feeds)
     broadcaster_summary: dict[tuple[str, str], dict] = {}
-    affiliate_auth = _recent_affiliate_auth()
+    # affiliate_auth already fetched above (used for HLS session detection).
+    # Build a flat {(stream, ip): affiliate_name} view for preferred_names assignment.
 
     # Check each broadcaster feed
     for stream in STREAM_NAMES:
@@ -816,7 +910,7 @@ def _check_health():
         stream_groups = affiliate_client_defs.get(stream, [])
         preferred_names = {
             ip: affiliate_name
-            for (auth_stream, ip), affiliate_name in affiliate_auth.items()
+            for (auth_stream, ip), (affiliate_name, _ts) in affiliate_auth.items()
             if auth_stream == stream and ip not in ignored_test_ips
         }
         for g, ip in _assign_connected_ips(stream_groups, monitored_outputs, preferred_names=preferred_names):
