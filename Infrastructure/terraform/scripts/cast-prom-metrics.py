@@ -85,6 +85,18 @@ session_pkt_loss = Gauge(
     ["stream", "ip", "direction"],
     registry=registry,
 )
+session_bitrate_kbps = Gauge(
+    "mist_operator_session_bitrate_kbps",
+    "Current throughput in kbps for active operator session",
+    ["stream", "ip", "direction", "connector"],
+    registry=registry,
+)
+session_retransmit_rate = Gauge(
+    "mist_operator_session_retransmit_rate",
+    "Retransmit ratio (retransmitted/sent) for active operator session",
+    ["stream", "ip", "direction", "connector"],
+    registry=registry,
+)
 
 # Stream health
 stream_up = Gauge(
@@ -196,6 +208,9 @@ for _s in STREAM_NAMES:
     for _d in ("input", "output", "unknown"):
         for _c in ("TSSRT", "HLS", "HTTP", "unknown"):
             operator_sessions.labels(stream=_s, direction=_d, connector=_c).set(0)
+
+# Per-session previous poll state for delta-based rate metrics
+_prev_poll: dict[tuple, dict] = {}  # (stream, ip, direction, connector) → {bytes, retrans, sent, ts}
 
 # ── PocketBase config cache (refreshed every HEALTH_POLL_SECS) ───────────────
 
@@ -405,6 +420,8 @@ def _poll_clients():
         session_uptime.clear()
         session_pkt_loss.clear()
         session_unregistered.clear()
+        session_bitrate_kbps.clear()
+        session_retransmit_rate.clear()
         return
 
     fi = {f: i for i, f in enumerate(fields)}
@@ -413,6 +430,8 @@ def _poll_clients():
     session_uptime.clear()
     session_pkt_loss.clear()
     session_unregistered.clear()
+    session_bitrate_kbps.clear()
+    session_retransmit_rate.clear()
 
     counts: dict[tuple[str, str, str], int] = {}
 
@@ -427,16 +446,18 @@ def _poll_clients():
         ip = row[fi["host"]]
         ip = ip.replace("::ffff:", "").strip("[]").split(":")[0] if "::ffff:" in ip or ip.startswith("[") else ip
 
-        conntime   = row[fi["conntime"]]
-        down_bytes = row[fi["down"]]
-        up_bytes   = row[fi["up"]]
-        pkt_count  = row[fi["pktcount"]]
-        pkt_lost   = row[fi["pktlost"]]
+        conntime      = row[fi["conntime"]]
+        down_bytes    = row[fi["down"]]
+        up_bytes      = row[fi["up"]]
+        pkt_count     = row[fi["pktcount"]]
+        pkt_lost      = row[fi["pktlost"]]
+        pkt_retransmit = row[fi["pktretransmit"]] if "pktretransmit" in fi else 0
 
         # Session metrics (all streams, not just configured ones)
         key = (stream, direction, connector)
         counts[key] = counts.get(key, 0) + 1
-        session_bytes.labels(stream=stream, ip=ip, direction=direction, connector=connector).set(down_bytes + up_bytes)
+        total_bytes = down_bytes + up_bytes
+        session_bytes.labels(stream=stream, ip=ip, direction=direction, connector=connector).set(total_bytes)
         session_uptime.labels(stream=stream, ip=ip, connector=connector).set(conntime)
 
         if pkt_count > 0:
@@ -445,6 +466,20 @@ def _poll_clients():
             if loss_ratio > PACKET_LOSS_THRESHOLD:
                 log.warning("HIGH PACKET LOSS: stream=%s ip=%s direction=%s loss=%.1f%%",
                             stream, ip, direction, loss_ratio * 100)
+
+        # Delta-based rate metrics (bitrate and retransmit rate)
+        rate_key = (stream, ip, direction, connector)
+        now = time.time()
+        prev = _prev_poll.get(rate_key)
+        if prev and (now - prev["ts"]) > 0:
+            dt = now - prev["ts"]
+            bitrate = max(0, total_bytes - prev["bytes"]) * 8 / (dt * 1000)
+            session_bitrate_kbps.labels(stream=stream, ip=ip, direction=direction, connector=connector).set(bitrate)
+            sent_delta = max(0, pkt_count - prev["sent"])
+            retrans_delta = max(0, pkt_retransmit - prev["retrans"])
+            retransmit_rate = retrans_delta / sent_delta if sent_delta > 0 else 0
+            session_retransmit_rate.labels(stream=stream, ip=ip, direction=direction, connector=connector).set(retransmit_rate)
+        _prev_poll[rate_key] = {"bytes": total_bytes, "retrans": pkt_retransmit, "sent": pkt_count, "ts": now}
 
         # Check unregistered for all external sessions (input and output) — skip loopback only
         if not _is_loopback_ip(ip):
