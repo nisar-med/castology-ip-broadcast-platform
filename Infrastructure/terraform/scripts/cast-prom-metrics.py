@@ -203,7 +203,6 @@ _pb_lock = threading.Lock()
 _pb_config = {
     "broadcasters": [],   # [{"name", "streams": [...], "token_key", "allowed_ips"}]
     "broadcaster_feeds": [],  # [{"broadcaster_name", "stream", "feed_role", "allowed_ips"}]
-    "groups": [],         # [{"name", "token_key"}]
     "affiliate_clients": [],  # [{"affiliate_name", "stream", "client_name", "endpoint_role", "allowed_ips"}]
     "tokens": set(),      # all valid token_keys
 }
@@ -253,7 +252,6 @@ def poll_pb_config():
                     "allowed_ips": b.get("allowed_ips", ""),
                 })
 
-            parsed_groups = []
             tokens = set()
             parsed_broadcaster_feeds = []
             parsed_affiliate_clients = []
@@ -274,18 +272,14 @@ def poll_pb_config():
                     "notes": feed.get("notes", ""),
                 })
 
+            active_group_names = set()
             for g in affiliates:
                 if not g.get("active", True):
                     continue
                 tk = g.get("token_key", "")
-                parsed_groups.append({
-                    "name":       g.get("name", "unknown"),
-                    "token_key":  tk,
-                })
+                active_group_names.add(g.get("name", "unknown"))
                 if tk:
                     tokens.add(tk)
-
-            active_group_names = {group["name"] for group in parsed_groups}
             for client in affiliate_clients:
                 if not client.get("active", True):
                     continue
@@ -310,12 +304,11 @@ def poll_pb_config():
             with _pb_lock:
                 _pb_config["broadcasters"] = parsed_broadcasters
                 _pb_config["broadcaster_feeds"] = parsed_broadcaster_feeds
-                _pb_config["groups"] = parsed_groups
                 _pb_config["affiliate_clients"] = parsed_affiliate_clients
                 _pb_config["tokens"] = tokens
 
-            log.info("PocketBase config refreshed: %d broadcasters, %d broadcaster feeds, %d groups, %d affiliate clients, %d tokens",
-                     len(parsed_broadcasters), len(parsed_broadcaster_feeds), len(parsed_groups), len(parsed_affiliate_clients), len(tokens))
+            log.info("PocketBase config refreshed: %d broadcasters, %d broadcaster feeds, %d affiliate clients, %d tokens",
+                     len(parsed_broadcasters), len(parsed_broadcaster_feeds), len(parsed_affiliate_clients), len(tokens))
         except Exception as e:
             log.warning("PocketBase config poll error: %s", e)
 
@@ -378,10 +371,6 @@ def mist_post(payload: dict) -> dict:
         return json.loads(resp.read())
 
 
-def _clients_request() -> dict:
-    return {"clients": {"time": -CLIENTS_LOOKBACK_SECS}}
-
-
 # ── Session + stream health poller ───────────────────────────────────────────
 
 def poll_sessions_and_streams():
@@ -406,7 +395,7 @@ def _poll_clients():
     # {"clients": {"fields": ["host","stream","protocol","conntime","position",
     #                         "down","up","downbps","upbps","sessid",
     #                         "pktcount","pktlost","pktretransmit"], "data": [...]}}
-    data = mist_post(_clients_request())
+    data = mist_post({"clients": {"time": -CLIENTS_LOOKBACK_SECS}})
     clients_block = data.get("clients", {})
     fields = clients_block.get("fields", [])
     rows   = clients_block.get("data", [])
@@ -426,9 +415,6 @@ def _poll_clients():
     session_unregistered.clear()
 
     counts: dict[tuple[str, str, str], int] = {}
-
-    with _pb_lock:
-        known_tokens = set(_pb_config["tokens"])
 
     for row in rows:
         if not isinstance(row, list) or len(row) < len(fields):
@@ -460,17 +446,15 @@ def _poll_clients():
                 log.warning("HIGH PACKET LOSS: stream=%s ip=%s direction=%s loss=%.1f%%",
                             stream, ip, direction, loss_ratio * 100)
 
-        # Unregistered session detection — sessid starts with I/O + token
-        sessid = row[fi["sessid"]] if "sessid" in fi else ""
-        # sessid format: "O<token_hash>..." — we can't reverse the token from hash,
-        # so flag any output session on a known stream where IP isn't in any group
-        is_registered = _is_registered(ip, stream, direction, known_tokens, sessid)
-        session_unregistered.labels(stream=stream, ip=ip, direction=direction, connector=connector).set(
-            0 if is_registered else 1
-        )
-        if not is_registered:
-            log.warning("UNREGISTERED SESSION: stream=%s ip=%s direction=%s connector=%s",
-                        stream, ip, direction, connector)
+        # Check unregistered for all external sessions (input and output) — skip loopback only
+        if not _is_loopback_ip(ip):
+            is_registered = _is_registered(ip, stream, direction)
+            session_unregistered.labels(stream=stream, ip=ip, direction=direction, connector=connector).set(
+                0 if is_registered else 1
+            )
+            if not is_registered:
+                log.warning("UNREGISTERED SESSION: stream=%s ip=%s direction=%s connector=%s",
+                            stream, ip, direction, connector)
 
     # Update aggregate counts for configured streams
     for name in STREAM_NAMES:
@@ -602,12 +586,9 @@ def _build_broadcaster_feeds(broadcasters: list[dict], broadcaster_feeds: list[d
     return stream_feeds
 
 
-def _build_affiliate_clients(groups: list[dict], affiliate_clients: list[dict]) -> dict[str, list[dict]]:
-    group_names = {group["name"] for group in groups}
+def _build_affiliate_clients(affiliate_clients: list[dict]) -> dict[str, list[dict]]:
     stream_clients: dict[str, list[dict]] = {stream: [] for stream in STREAM_NAMES}
     for client in affiliate_clients:
-        if client["affiliate_name"] not in group_names:
-            continue
         stream_clients.setdefault(client["stream"], []).append({
             "name": client["affiliate_name"],
             "stream": client["stream"],
@@ -682,17 +663,26 @@ def _recent_affiliate_auth() -> dict[tuple[str, str], tuple[str, float]]:
     return assignments
 
 
-def _is_registered(ip: str, stream: str, direction: str, known_tokens: set, sessid: str) -> bool:
+def _is_registered(ip: str, stream: str, direction: str) -> bool:
     with _pb_lock:
         broadcasters = _pb_config["broadcasters"]
+        broadcaster_feeds = _pb_config["broadcaster_feeds"]
         affiliate_clients = _pb_config["affiliate_clients"]
 
-    # Input sessions — check broadcaster allowed_ips
+    # Input sessions — check broadcaster_feeds allowed_ips (feed-level), falling back to broadcaster-level
     if direction == "input":
-        for b in broadcasters:
-            if stream in b["streams"]:
-                if _ip_allowed(ip, _allowed_ips(b["allowed_ips"])):
-                    return True
+        for feed in broadcaster_feeds:
+            if feed["stream"] != stream:
+                continue
+            allowed = _allowed_ips(feed["allowed_ips"])
+            if not allowed:
+                # Fall back to broadcaster-level allowed_ips
+                for b in broadcasters:
+                    if b["name"] == feed["broadcaster_name"]:
+                        allowed = _allowed_ips(b["allowed_ips"])
+                        break
+            if _ip_allowed(ip, allowed):
+                return True
         return False
 
     # Output sessions — check operator affiliate_clients IPs
@@ -763,7 +753,6 @@ def _check_health():
     with _pb_lock:
         broadcasters = list(_pb_config["broadcasters"])
         broadcaster_feeds = list(_pb_config["broadcaster_feeds"])
-        groups = list(_pb_config["groups"])
         affiliate_clients = list(_pb_config["affiliate_clients"])
 
     connection_status.clear()
@@ -810,16 +799,11 @@ def _check_health():
             output_bytes[session_key] = row[fi["down"]] + row[fi["up"]]
             output_uptime[session_key] = row[fi["conntime"]]
 
-    # Fetch jitter from active_streams info (already polled in active_streams response)
-    try:
-        streams_data = mist_post({"active_streams": None})
-        raw = streams_data.get("active_streams", {})
-        if isinstance(raw, dict):
-            for sname, sinfo in raw.items():
-                if isinstance(sinfo, dict):
-                    stream_jitter[sname] = sinfo.get("jitter", 0)
-    except Exception:
-        pass
+    raw_streams = data.get("active_streams", {})
+    if isinstance(raw_streams, dict):
+        for sname, sinfo in raw_streams.items():
+            if isinstance(sinfo, dict):
+                stream_jitter[sname] = sinfo.get("jitter", 0)
 
     broadcaster_feed_defs = _build_broadcaster_feeds(broadcasters, broadcaster_feeds)
     broadcaster_summary: dict[tuple[str, str], dict] = {}
@@ -877,7 +861,7 @@ def _check_health():
             ingest_jitter.labels(name=broadcaster["name"], stream=stream, ip=summary["ip"]).set(summary["jitter"])
             ingest_loss.labels(name=broadcaster["name"], stream=stream, ip=summary["ip"]).set(summary["loss"])
 
-    affiliate_client_defs = _build_affiliate_clients(groups, affiliate_clients)
+    affiliate_client_defs = _build_affiliate_clients(affiliate_clients)
     affiliate_summary: dict[tuple[str, str], dict] = {}
 
     # Check each affiliate client
