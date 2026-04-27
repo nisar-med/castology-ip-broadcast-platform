@@ -8,11 +8,9 @@ sessions are connected. Flags unregistered sessions.
 Exposes metrics on port 9101 for Prometheus to scrape.
 """
 
-import datetime
 import json
 import ipaddress
 import os
-import re
 import subprocess
 import threading
 import time
@@ -49,9 +47,6 @@ HEALTH_POLL_SECS  = 60
 R2_POLL_SECS      = 5
 HLS_BASE_DIR      = "/var/lib/mist-hls"
 CLIENTS_LOOKBACK_SECS = int(os.environ.get("CLIENTS_LOOKBACK_SECS", "3"))
-# Journal lookback for affiliate name attribution only — not used for liveness.
-# HLS liveness is now determined by ps (MistSession), same as SRT.
-AUTH_LOG_LOOKBACK_SECS = 86400  # 24 hours
 
 # Packet loss alert threshold — alert if lost/sent > this over the scrape window
 PACKET_LOSS_THRESHOLD = 0.02  # 2%
@@ -212,6 +207,12 @@ for _s in STREAM_NAMES:
 # Per-session previous poll state for delta-based rate metrics
 _prev_poll: dict[tuple, dict] = {}  # (stream, ip, direction, connector) → {bytes, retrans, sent, ts}
 
+# Last written IP labels for health gauges — used to zero out stale series when IP changes
+_last_ingest_ip:   dict[tuple[str, str], str] = {}  # (name, stream) → ip
+_last_playout_ip:  dict[tuple[str, str], str] = {}  # (name, stream) → ip
+_last_feed_ip:     dict[tuple[str, str, str], str] = {}  # (name, stream, feed_role) → ip
+_last_client_ip:   dict[tuple[str, str, str, str], str] = {}  # (name, stream, client_name, endpoint_role) → ip
+
 # ── PocketBase config cache (refreshed every HEALTH_POLL_SECS) ───────────────
 
 _pb_lock = threading.Lock()
@@ -219,7 +220,6 @@ _pb_config = {
     "broadcasters": [],      # [{"name", "streams": [...], "token_key", "allowed_ips"}]
     "broadcaster_feeds": [], # [{"broadcaster_name", "stream", "feed_role", "allowed_ips"}]
     "affiliate_clients": [], # [{"affiliate_name", "stream", "client_name", "endpoint_role", "allowed_ips"}]
-    "active_sessions": {},   # {(stream, ip): {"affiliate", "client_name"}} — written by CONN_PLAY trigger
     "tokens": set(),         # all valid token_keys
 }
 
@@ -245,6 +245,7 @@ def _pb_fetch(token: str, collection: str) -> list:
             return []
         raise
 
+
 def poll_pb_config():
     while True:
         try:
@@ -253,7 +254,6 @@ def poll_pb_config():
             broadcaster_feeds = _pb_fetch(token, "broadcaster_feeds")
             affiliates = _pb_fetch(token, "affiliates")
             affiliate_clients = _pb_fetch(token, "affiliate_clients")
-            active_sessions_raw = _pb_fetch(token, "active_sessions")
 
             parsed_broadcasters = []
             for b in broadcasters:
@@ -311,6 +311,7 @@ def poll_pb_config():
                     "client_name": client_name,
                     "endpoint_role": (client.get("endpoint_role") or "primary").strip().lower() or "primary",
                     "allowed_ips": client.get("allowed_ips", ""),
+                    "is_test_client": bool(client.get("is_test_client", False)),
                     "notes": client.get("notes", ""),
                 })
 
@@ -318,76 +319,18 @@ def poll_pb_config():
                 if b["token_key"]:
                     tokens.add(b["token_key"])
 
-            # active_sessions: keyed by (stream, ip) — written by CONN_PLAY trigger
-            parsed_active_sessions = {}
-            for s in active_sessions_raw:
-                stream = (s.get("stream") or "").strip()
-                ip = (s.get("ip") or "").strip()
-                if stream and ip:
-                    parsed_active_sessions[(stream, ip)] = {
-                        "affiliate": (s.get("affiliate") or "").strip(),
-                        "client_name": (s.get("client_name") or "").strip(),
-                    }
-
             with _pb_lock:
                 _pb_config["broadcasters"] = parsed_broadcasters
                 _pb_config["broadcaster_feeds"] = parsed_broadcaster_feeds
                 _pb_config["affiliate_clients"] = parsed_affiliate_clients
-                _pb_config["active_sessions"] = parsed_active_sessions
                 _pb_config["tokens"] = tokens
 
-            log.info("PocketBase config refreshed: %d broadcasters, %d broadcaster feeds, %d affiliate clients, %d active sessions, %d tokens",
-                     len(parsed_broadcasters), len(parsed_broadcaster_feeds), len(parsed_affiliate_clients), len(parsed_active_sessions), len(tokens))
+            log.info("PocketBase config refreshed: %d broadcasters, %d broadcaster feeds, %d affiliate clients, %d tokens",
+                     len(parsed_broadcasters), len(parsed_broadcaster_feeds), len(parsed_affiliate_clients), len(tokens))
         except Exception as e:
             log.warning("PocketBase config poll error: %s", e)
 
         time.sleep(HEALTH_POLL_SECS)
-
-
-# ── MistServer process list session parser ────────────────────────────────────
-
-def _parse_mist_sessions() -> dict[str, dict[str, set]]:
-    """Parse MistSession processes from ps aux → SRT/HLS inputs and outputs.
-
-    Returns {"input": {stream: {ip,...}}, "output": {stream: {ip,...}}}
-    Session ID prefix: I=input (SRT ingest), O=output (SRT push-out).
-    HLS viewer sessions have no I/O prefix but carry a real (non-loopback) IP
-    when trustedproxy is set — these are treated as outputs.
-    """
-    result: dict[str, dict[str, set]] = {"input": {}, "output": {}}
-    try:
-        proc = subprocess.run(["ps", "aux"], capture_output=True, text=True, check=False)
-        for line in proc.stdout.splitlines():
-            if "MistSession" not in line:
-                continue
-            parts = line.split()
-            sess_idx = next((i for i, p in enumerate(parts) if "MistSession" in p), None)
-            if sess_idx is None:
-                continue
-            sess_id = parts[sess_idx + 1] if sess_idx + 1 < len(parts) else ""
-            args = parts[sess_idx + 1:]
-
-            stream = ip = ""
-            for i, a in enumerate(args):
-                if a == "--streamname" and i + 1 < len(args):
-                    stream = args[i + 1]
-                elif a == "--ip" and i + 1 < len(args):
-                    ip = args[i + 1]
-
-            if not stream or not ip:
-                continue
-            ip = ip.replace("::ffff:", "").strip("[]").split(":")[0]
-            if _is_loopback_ip(ip):
-                continue
-
-            if sess_id.startswith("I"):
-                result["input"].setdefault(stream, set()).add(ip)
-            else:
-                # O-prefix = SRT output; no prefix = HLS viewer (real IP via trustedproxy)
-                result["output"].setdefault(stream, set()).add(ip)
-    except Exception as e:
-        log.warning("ps aux MistSession parse error: %s", e)
-    return result
 
 
 # ── MistServer API helpers ────────────────────────────────────────────────────
@@ -405,116 +348,10 @@ def mist_post(payload: dict) -> dict:
 def poll_sessions_and_streams():
     while True:
         try:
-            _poll_clients()
-        except Exception as e:
-            log.warning("clients poll error: %s", e)
-        try:
-            _poll_active_streams()
-        except Exception as e:
-            log.warning("active_streams poll error: %s", e)
-        try:
             _check_health()
         except Exception as e:
             log.warning("health check error: %s", e)
         time.sleep(SESSION_POLL_SECS)
-
-
-def _poll_clients():
-    # POST /api {"clients": null} →
-    # {"clients": {"fields": ["host","stream","protocol","conntime","position",
-    #                         "down","up","downbps","upbps","sessid",
-    #                         "pktcount","pktlost","pktretransmit"], "data": [...]}}
-    data = mist_post({"clients": {"time": -CLIENTS_LOOKBACK_SECS}})
-    clients_block = data.get("clients", {})
-    fields = clients_block.get("fields", [])
-    rows   = clients_block.get("data", [])
-
-    if not fields:
-        session_bytes.clear()
-        session_uptime.clear()
-        session_pkt_loss.clear()
-        session_unregistered.clear()
-        session_bitrate_kbps.clear()
-        session_retransmit_rate.clear()
-        return
-
-    fi = {f: i for i, f in enumerate(fields)}
-
-    session_bytes.clear()
-    session_uptime.clear()
-    session_pkt_loss.clear()
-    session_unregistered.clear()
-    session_bitrate_kbps.clear()
-    session_retransmit_rate.clear()
-
-    counts: dict[tuple[str, str, str], int] = {}
-
-    for row in rows:
-        if not isinstance(row, list) or len(row) < len(fields):
-            continue
-
-        stream    = row[fi["stream"]]
-        protocol  = row[fi["protocol"]]              # e.g. "OUTPUT:TSSRT"
-        direction, connector = _parse_protocol(protocol)
-
-        ip = row[fi["host"]]
-        ip = ip.replace("::ffff:", "").strip("[]").split(":")[0] if "::ffff:" in ip or ip.startswith("[") else ip
-
-        conntime      = row[fi["conntime"]]
-        down_bytes    = row[fi["down"]]
-        up_bytes      = row[fi["up"]]
-        pkt_count     = row[fi["pktcount"]]
-        pkt_lost      = row[fi["pktlost"]]
-        pkt_retransmit = row[fi["pktretransmit"]] if "pktretransmit" in fi else 0
-
-        # Session metrics (all streams, not just configured ones)
-        key = (stream, direction, connector)
-        counts[key] = counts.get(key, 0) + 1
-        total_bytes = down_bytes + up_bytes
-
-        affiliate, client_name = ("", "") if _is_loopback_ip(ip) else _resolve_session_identity(ip, stream, direction)
-
-        session_bytes.labels(stream=stream, ip=ip, direction=direction, connector=connector, affiliate=affiliate, client_name=client_name).set(total_bytes)
-        session_uptime.labels(stream=stream, ip=ip, connector=connector, affiliate=affiliate, client_name=client_name).set(conntime)
-
-        if pkt_count > 0:
-            loss_ratio = pkt_lost / pkt_count
-            session_pkt_loss.labels(stream=stream, ip=ip, direction=direction, affiliate=affiliate, client_name=client_name).set(loss_ratio)
-            if loss_ratio > PACKET_LOSS_THRESHOLD:
-                log.warning("HIGH PACKET LOSS: stream=%s ip=%s direction=%s loss=%.1f%%",
-                            stream, ip, direction, loss_ratio * 100)
-
-        # Delta-based rate metrics (bitrate and retransmit rate)
-        rate_key = (stream, ip, direction, connector)
-        now = time.time()
-        prev = _prev_poll.get(rate_key)
-        if prev and (now - prev["ts"]) > 0:
-            dt = now - prev["ts"]
-            bitrate = max(0, total_bytes - prev["bytes"]) * 8 / (dt * 1000)
-            session_bitrate_kbps.labels(stream=stream, ip=ip, direction=direction, connector=connector, affiliate=affiliate, client_name=client_name).set(bitrate)
-            sent_delta = max(0, pkt_count - prev["sent"])
-            retrans_delta = max(0, pkt_retransmit - prev["retrans"])
-            retransmit_rate = retrans_delta / sent_delta if sent_delta > 0 else 0
-            session_retransmit_rate.labels(stream=stream, ip=ip, direction=direction, connector=connector, affiliate=affiliate, client_name=client_name).set(retransmit_rate)
-        _prev_poll[rate_key] = {"bytes": total_bytes, "retrans": pkt_retransmit, "sent": pkt_count, "ts": now}
-
-        # Check unregistered for all external sessions (input and output) — skip loopback only
-        if not _is_loopback_ip(ip):
-            is_registered = affiliate != "" or _is_registered(ip, stream, direction)
-            session_unregistered.labels(stream=stream, ip=ip, direction=direction, connector=connector).set(
-                0 if is_registered else 1
-            )
-            if not is_registered:
-                log.warning("UNREGISTERED SESSION: stream=%s ip=%s direction=%s connector=%s",
-                            stream, ip, direction, connector)
-
-    # Update aggregate counts for configured streams
-    for name in STREAM_NAMES:
-        for d in ("input", "output", "unknown"):
-            for c in ("TSSRT", "HLS", "HTTP", "unknown"):
-                operator_sessions.labels(stream=name, direction=d, connector=c).set(
-                    counts.get((name, d, c), 0)
-                )
 
 
 def _allowed_ips(raw: str) -> list[str]:
@@ -555,39 +392,20 @@ def _ip_allowed(ip: str, allowed: list[str]) -> bool:
     return False
 
 
-def _assign_connected_ips(entities, connected_ips: set[str], preferred_names: dict[str, str] | None = None):
+def _assign_connected_ips(entities, connected_ips: set[str]):
     remaining = set(connected_ips)
     assignments = []
     explicit = []
     wildcard = []
-    assigned_indexes = set()
-
-    if preferred_names:
-        for ip in sorted(list(remaining)):
-            preferred_name = preferred_names.get(ip)
-            if not preferred_name:
-                continue
-            for index, entity in enumerate(entities):
-                if index in assigned_indexes:
-                    continue
-                if entity["name"] != preferred_name:
-                    continue
-                if _ip_allowed(ip, _allowed_ips(entity["allowed_ips"])):
-                    assignments.append((entity, ip))
-                    assigned_indexes.add(index)
-                    remaining.remove(ip)
-                    break
 
     for index, entity in enumerate(entities):
-        if index in assigned_indexes:
-            continue
         allowed = _allowed_ips(entity["allowed_ips"])
         if allowed:
-            explicit.append((index, entity, allowed))
+            explicit.append((entity, allowed))
         else:
-            wildcard.append((index, entity))
+            wildcard.append(entity)
 
-    for index, entity, allowed in explicit:
+    for entity, allowed in explicit:
         match = None
         for entry in allowed:
             candidates = sorted(ip for ip in remaining if _ip_allowed(ip, [entry]))
@@ -599,14 +417,12 @@ def _assign_connected_ips(entities, connected_ips: set[str], preferred_names: di
         assignments.append((entity, match))
         if match is not None:
             remaining.remove(match)
-        assigned_indexes.add(index)
 
-    for index, entity in wildcard:
+    for entity in wildcard:
         match = sorted(remaining)[0] if remaining else None
         assignments.append((entity, match))
         if match is not None:
             remaining.remove(match)
-        assigned_indexes.add(index)
 
     return assignments
 
@@ -641,6 +457,8 @@ def _build_broadcaster_feeds(broadcasters: list[dict], broadcaster_feeds: list[d
 def _build_affiliate_clients(affiliate_clients: list[dict]) -> dict[str, list[dict]]:
     stream_clients: dict[str, list[dict]] = {stream: [] for stream in STREAM_NAMES}
     for client in affiliate_clients:
+        if client.get("is_test_client"):
+            continue
         stream_clients.setdefault(client["stream"], []).append({
             "name": client["affiliate_name"],
             "stream": client["stream"],
@@ -652,67 +470,19 @@ def _build_affiliate_clients(affiliate_clients: list[dict]) -> dict[str, list[di
 
 
 
-def _recent_affiliate_auth() -> dict[tuple[str, str], tuple[str, float]]:
-    """Read ALLOW: entries from the cast-mist-stream-auth journal.
+def _is_test_client_session(ip: str, stream: str) -> bool:
+    with _pb_lock:
+        affiliate_clients = list(_pb_config["affiliate_clients"])
 
-    Returns {(stream, ip): (affiliate_name, last_seen_timestamp)} for all
-    entries within AUTH_LOG_LOOKBACK_SECS (24h).  Used only for affiliate name
-    attribution — liveness is determined by ps (MistSession), not this journal.
-    """
-    cutoff = f"{AUTH_LOG_LOOKBACK_SECS} seconds ago"
-    try:
-        result = subprocess.run(
-            [
-                "journalctl",
-                "-t", "cast-mist-stream-auth",
-                "--since", cutoff,
-                "--no-pager",
-                "-o", "short-iso",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except Exception as e:
-        log.warning("auth log read error: %s", e)
-        return {}
-
-    assignments: dict[tuple[str, str], tuple[str, float]] = {}
-    # short-iso line format: 2024-01-15T12:34:56+0000 hostname cast-mist-stream-auth[pid]: MESSAGE
-    ts_re = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{4})")
-    allow_re = re.compile(
-        r"ALLOW: stream=(?P<stream>\S+) affiliate=(?P<affiliate>.+?) client=(?P<client>.+?) role=\S+ ip=(?P<ip>\S+)$"
-    )
-    for line in result.stdout.splitlines():
-        allow_match = allow_re.search(line)
-        if not allow_match:
+    for client in affiliate_clients:
+        if client["stream"] != stream or not client.get("is_test_client"):
             continue
-        stream = allow_match.group("stream").strip()
-        affiliate = allow_match.group("affiliate").strip()
-        ip = allow_match.group("ip").strip()
-        if not (stream and affiliate and ip):
-            continue
-
-        ts_match = ts_re.match(line)
-        if ts_match:
-            try:
-                ts_str = ts_match.group(1)
-                # Convert +0000 → +00:00 for Python 3.6 fromisoformat compat
-                if len(ts_str) > 19 and ts_str[19] in ("+", "-") and ":" not in ts_str[20:]:
-                    ts_str = ts_str[:22] + ":" + ts_str[22:]
-                dt = datetime.datetime.fromisoformat(ts_str)
-                ts = dt.timestamp()
-            except Exception:
-                ts = time.time()
-        else:
-            ts = time.time()
-
-        key = (stream, ip)
-        existing = assignments.get(key)
-        if existing is None or ts > existing[1]:
-            assignments[key] = (affiliate, ts)
-
-    return assignments
+        allowed = _allowed_ips(client["allowed_ips"])
+        if not allowed and client["client_name"]:
+            allowed = [client["client_name"]]
+        if _ip_allowed(ip, allowed):
+            return True
+    return False
 
 
 def _is_registered(ip: str, stream: str, direction: str) -> bool:
@@ -741,6 +511,8 @@ def _is_registered(ip: str, stream: str, direction: str) -> bool:
     for client in affiliate_clients:
         if client["stream"] != stream:
             continue
+        if client.get("is_test_client"):
+            continue
         allowed = _allowed_ips(client["allowed_ips"])
         if not allowed and client["client_name"]:
             allowed = [client["client_name"]]
@@ -752,25 +524,12 @@ def _is_registered(ip: str, stream: str, direction: str) -> bool:
 
 def _resolve_session_identity(ip: str, stream: str, direction: str) -> tuple[str, str]:
     """Return (affiliate_name, client_name) for an IP+stream+direction, or ("", "") if unknown.
-
-    Priority:
-    1. active_sessions (written by CONN_PLAY trigger at token-auth time) — ground truth
-    2. IP matching against PocketBase config — fallback for sessions that predate the trigger
-       or whose CONN_PLAY record hasn't been polled yet (up to HEALTH_POLL_SECS lag).
     """
     with _pb_lock:
-        active_sessions = _pb_config["active_sessions"]
         broadcaster_feeds = _pb_config["broadcaster_feeds"]
         broadcasters = _pb_config["broadcasters"]
         affiliate_clients = _pb_config["affiliate_clients"]
 
-    # 1. Token-based identity from CONN_PLAY trigger — immune to IP aliasing bugs.
-    #    active_sessions stores both input (broadcaster) and output (affiliate) sessions.
-    session = active_sessions.get((stream, ip))
-    if session and session.get("affiliate"):
-        return session["affiliate"], session.get("client_name", "")
-
-    # 2. IP matching fallback (covers sessions that predate CONN_PLAY or haven't polled yet)
     if direction == "input":
         for feed in broadcaster_feeds:
             if feed["stream"] != stream:
@@ -796,117 +555,117 @@ def _resolve_session_identity(ip: str, stream: str, direction: str) -> tuple[str
     return "", ""
 
 
-def _poll_active_streams():
-    data = mist_post({"active_streams": None})
-    active = data.get("active_streams", [])
-    if isinstance(active, dict):
-        active = list(active.keys())
-
-    for name in STREAM_NAMES:
-        stream_up.labels(stream=name).set(1 if name in active else 0)
-
-
 def _check_health():
     """Cross-reference live sessions against PocketBase config."""
-    data = mist_post({"clients": {"time": -CLIENTS_LOOKBACK_SECS}, "active_streams": None})
+    data = mist_post({"clients": {"time": -CLIENTS_LOOKBACK_SECS}})
     clients_block = data.get("clients", {})
     fields = clients_block.get("fields", [])
     rows   = clients_block.get("data", [])
-    active_streams = data.get("active_streams", [])
-    if isinstance(active_streams, dict):
-        active_streams = list(active_streams.keys())
 
     fi = {f: i for i, f in enumerate(fields)} if fields else {}
 
-    # --- Build active session sets from three sources ---
-    #
-    # Source 1: ps aux MistSession — authoritative for SRT ingest (I-prefix) and
-    #           SRT output (O-prefix).  HLS is stateless; no MistSession is created.
-    ps_sessions = _parse_mist_sessions()
-    active_inputs: dict[str, set] = {s: set(ips) for s, ips in ps_sessions["input"].items()}
-    active_outputs: dict[str, set] = {s: set(ips) for s, ips in ps_sessions["output"].items()}
+    # Per-session metrics
+    session_bytes.clear()
+    session_uptime.clear()
+    session_pkt_loss.clear()
+    session_unregistered.clear()
+    session_bitrate_kbps.clear()
+    session_retransmit_rate.clear()
 
-    # Source 2: cast-mist-stream-auth ALLOW: journal — affiliate name attribution only.
-    #           Liveness for HLS is now determined by ps (MistSession with real IP
-    #           via trustedproxy), same as SRT. Journal used only to map ip→affiliate.
-    affiliate_auth = _recent_affiliate_auth()
+    counts: dict[tuple[str, str, str], int] = {}
+    active_inputs: dict[str, set] = {}
+    active_outputs: dict[str, set] = {}
+    input_loss:    dict[tuple[str, str], float] = {}
+    output_loss:   dict[tuple[str, str], float] = {}
+    output_bytes:  dict[tuple[str, str], float] = {}
+    output_uptime: dict[tuple[str, str], float] = {}
 
-    # Source 3: /api clients — adds SRT sessions that ps may have missed (race
-    #           window at session start/end) and provides metrics (bytes, loss, uptime).
+    now = time.time()
     for row in rows:
-        if not isinstance(row, list) or not fi:
+        if not isinstance(row, list) or not fi or len(row) < len(fields):
             continue
-        stream   = row[fi["stream"]]
-        protocol = row[fi["protocol"]]
+
+        stream    = row[fi["stream"]]
+        protocol  = row[fi["protocol"]]
         direction, connector = _parse_protocol(protocol)
         ip = row[fi["host"]]
         ip = ip.replace("::ffff:", "").strip("[]").split(":")[0] if "::ffff:" in ip or ip.startswith("[") else ip
+        if direction == "output" and not _is_loopback_ip(ip) and _is_test_client_session(ip, stream):
+            continue
+
+        conntime       = row[fi["conntime"]]
+        down_bytes     = row[fi["down"]]
+        up_bytes       = row[fi["up"]]
+        pkt_count      = row[fi["pktcount"]]
+        pkt_lost       = row[fi["pktlost"]]
+        pkt_retransmit = row[fi["pktretransmit"]] if "pktretransmit" in fi else 0
+        total_bytes    = down_bytes + up_bytes
+        loss           = pkt_lost / pkt_count if pkt_count > 0 else 0.0
+        session_key    = (stream, ip)
+
+        counts[(stream, direction, connector)] = counts.get((stream, direction, connector), 0) + 1
+
         if direction == "input":
             active_inputs.setdefault(stream, set()).add(ip)
+            input_loss[session_key] = loss
         elif not _is_loopback_ip(ip):
             active_outputs.setdefault(stream, set()).add(ip)
-        elif connector in ("HTTP", "HLS", "unknown"):
-            log.info("Ignoring loopback playout session: stream=%s ip=%s connector=%s", stream, ip, connector)
+            output_loss[session_key]   = loss
+            output_bytes[session_key]  = total_bytes
+            output_uptime[session_key] = conntime
+
+        affiliate, client_name = ("", "") if _is_loopback_ip(ip) else _resolve_session_identity(ip, stream, direction)
+
+        session_bytes.labels(stream=stream, ip=ip, direction=direction, connector=connector, affiliate=affiliate, client_name=client_name).set(total_bytes)
+        session_uptime.labels(stream=stream, ip=ip, connector=connector, affiliate=affiliate, client_name=client_name).set(conntime)
+
+        if pkt_count > 0:
+            session_pkt_loss.labels(stream=stream, ip=ip, direction=direction, affiliate=affiliate, client_name=client_name).set(loss)
+            if loss > PACKET_LOSS_THRESHOLD:
+                log.warning("HIGH PACKET LOSS: stream=%s ip=%s direction=%s loss=%.1f%%",
+                            stream, ip, direction, loss * 100)
+
+        rate_key = (stream, ip, direction, connector)
+        prev = _prev_poll.get(rate_key)
+        if prev and (now - prev["ts"]) > 0:
+            dt = now - prev["ts"]
+            bitrate = max(0, total_bytes - prev["bytes"]) * 8 / (dt * 1000)
+            session_bitrate_kbps.labels(stream=stream, ip=ip, direction=direction, connector=connector, affiliate=affiliate, client_name=client_name).set(bitrate)
+            sent_delta    = max(0, pkt_count - prev["sent"])
+            retrans_delta = max(0, pkt_retransmit - prev["retrans"])
+            session_retransmit_rate.labels(stream=stream, ip=ip, direction=direction, connector=connector, affiliate=affiliate, client_name=client_name).set(
+                retrans_delta / sent_delta if sent_delta > 0 else 0
+            )
+        _prev_poll[rate_key] = {"bytes": total_bytes, "retrans": pkt_retransmit, "sent": pkt_count, "ts": now}
+
+        if not _is_loopback_ip(ip):
+            is_registered = affiliate != "" or _is_registered(ip, stream, direction)
+            session_unregistered.labels(stream=stream, ip=ip, direction=direction, connector=connector).set(
+                0 if is_registered else 1
+            )
+            if not is_registered:
+                log.warning("UNREGISTERED SESSION: stream=%s ip=%s direction=%s connector=%s",
+                            stream, ip, direction, connector)
+
+    for name in STREAM_NAMES:
+        stream_up.labels(stream=name).set(1 if name in active_inputs else 0)
+        for d in ("input", "output", "unknown"):
+            for c in ("TSSRT", "HLS", "HTTP", "unknown"):
+                operator_sessions.labels(stream=name, direction=d, connector=c).set(
+                    counts.get((name, d, c), 0)
+                )
 
     with _pb_lock:
         broadcasters = list(_pb_config["broadcasters"])
         broadcaster_feeds = list(_pb_config["broadcaster_feeds"])
         affiliate_clients = list(_pb_config["affiliate_clients"])
 
-    connection_status.clear()
-    ingest_status.clear()
-    ingest_jitter.clear()
-    ingest_loss.clear()
-    broadcaster_feed_status.clear()
-    broadcaster_feed_jitter.clear()
-    broadcaster_feed_loss.clear()
-    affiliate_client_status.clear()
-    affiliate_client_loss.clear()
-    affiliate_client_bytes.clear()
-    affiliate_client_uptime.clear()
-    playout_status.clear()
-    playout_loss.clear()
-    playout_bytes.clear()
-    playout_uptime.clear()
-
-    # Build per-IP session data maps for joining
-    # stream → jitter (from active_streams data — polled separately, use cached value)
-    # ip → {pkt_loss, bytes, uptime} from active sessions
-    input_loss:   dict[tuple[str, str], float] = {}   # (stream, ip) → loss ratio
-    output_loss:  dict[tuple[str, str], float] = {}   # (stream, ip) → loss ratio
-    output_bytes: dict[tuple[str, str], float] = {}   # (stream, ip) → bytes
-    output_uptime: dict[tuple[str, str], float] = {}  # (stream, ip) → uptime seconds
-    stream_jitter: dict[str, float] = {}  # stream → jitter ms
-
-    for row in rows:
-        if not isinstance(row, list) or not fi:
-            continue
-        stream   = row[fi["stream"]]
-        protocol = row[fi["protocol"]]
-        direction, _ = _parse_protocol(protocol)
-        ip = row[fi["host"]]
-        ip = ip.replace("::ffff:", "").strip("[]").split(":")[0] if "::ffff:" in ip or ip.startswith("[") else ip
-        pkt_count = row[fi["pktcount"]]
-        pkt_lost  = row[fi["pktlost"]]
-        loss = pkt_lost / pkt_count if pkt_count > 0 else 0.0
-        session_key = (stream, ip)
-        if direction == "input":
-            input_loss[session_key] = loss
-        elif not _is_loopback_ip(ip):
-            output_loss[session_key] = loss
-            output_bytes[session_key] = row[fi["down"]] + row[fi["up"]]
-            output_uptime[session_key] = row[fi["conntime"]]
-
-    raw_streams = data.get("active_streams", {})
-    if isinstance(raw_streams, dict):
-        for sname, sinfo in raw_streams.items():
-            if isinstance(sinfo, dict):
-                stream_jitter[sname] = sinfo.get("jitter", 0)
+    # Do NOT .clear() health gauges — that causes Grafana to show stale values when
+    # the ip= label changes (old series lingers until Prometheus staleness window).
+    # Instead we zero out the previous label set explicitly when the IP changes.
 
     broadcaster_feed_defs = _build_broadcaster_feeds(broadcasters, broadcaster_feeds)
     broadcaster_summary: dict[tuple[str, str], dict] = {}
-    # affiliate_auth already fetched above (used for HLS session detection).
-    # Build a flat {(stream, ip): affiliate_name} view for preferred_names assignment.
 
     # Check each broadcaster feed
     for stream in STREAM_NAMES:
@@ -917,7 +676,7 @@ def _check_health():
             candidate = {
                 "ip": ip or "none",
                 "status": 1 if ip is not None else 0,
-                "jitter": stream_jitter.get(stream, 0) if ip is not None else 0,
+                "jitter": 0,
                 "loss": input_loss.get((stream, ip), 0) if ip is not None else 0,
                 "feed_role": b["feed_role"],
             }
@@ -931,14 +690,18 @@ def _check_health():
                 if candidate_primary and not existing_primary:
                     broadcaster_summary[summary_key] = candidate
 
-            if ip is not None:
-                broadcaster_feed_status.labels(name=b["name"], stream=stream, feed_role=b["feed_role"], ip=ip).set(1)
-                broadcaster_feed_jitter.labels(name=b["name"], stream=stream, feed_role=b["feed_role"], ip=ip).set(stream_jitter.get(stream, 0))
-                broadcaster_feed_loss.labels(name=b["name"], stream=stream, feed_role=b["feed_role"], ip=ip).set(input_loss.get((stream, ip), 0))
-            else:
-                broadcaster_feed_status.labels(name=b["name"], stream=stream, feed_role=b["feed_role"], ip="none").set(0)
-                broadcaster_feed_jitter.labels(name=b["name"], stream=stream, feed_role=b["feed_role"], ip="none").set(0)
-                broadcaster_feed_loss.labels(name=b["name"], stream=stream, feed_role=b["feed_role"], ip="none").set(0)
+            new_ip = ip if ip is not None else "none"
+            feed_key = (b["name"], stream, b["feed_role"])
+            old_ip = _last_feed_ip.get(feed_key)
+            if old_ip and old_ip != new_ip:
+                broadcaster_feed_status.labels(name=b["name"], stream=stream, feed_role=b["feed_role"], ip=old_ip).set(0)
+                broadcaster_feed_jitter.labels(name=b["name"], stream=stream, feed_role=b["feed_role"], ip=old_ip).set(0)
+                broadcaster_feed_loss.labels(name=b["name"], stream=stream, feed_role=b["feed_role"], ip=old_ip).set(0)
+            _last_feed_ip[feed_key] = new_ip
+            broadcaster_feed_status.labels(name=b["name"], stream=stream, feed_role=b["feed_role"], ip=new_ip).set(1 if ip is not None else 0)
+            broadcaster_feed_jitter.labels(name=b["name"], stream=stream, feed_role=b["feed_role"], ip=new_ip).set(0)
+            broadcaster_feed_loss.labels(name=b["name"], stream=stream, feed_role=b["feed_role"], ip=new_ip).set(input_loss.get((stream, ip), 0) if ip is not None else 0)
+            if ip is None:
                 log.warning("BROADCASTER FEED OFFLINE: broadcaster=%s stream=%s feed_role=%s", b["name"], stream, b["feed_role"])
 
     for broadcaster in broadcasters:
@@ -949,15 +712,19 @@ def _check_health():
                 "jitter": 0,
                 "loss": 0,
             })
-            connection_status.labels(
-                name=broadcaster["name"],
-                stream=stream,
-                role="broadcaster",
-                ip=summary["ip"],
-            ).set(summary["status"])
-            ingest_status.labels(name=broadcaster["name"], stream=stream, ip=summary["ip"]).set(summary["status"])
-            ingest_jitter.labels(name=broadcaster["name"], stream=stream, ip=summary["ip"]).set(summary["jitter"])
-            ingest_loss.labels(name=broadcaster["name"], stream=stream, ip=summary["ip"]).set(summary["loss"])
+            new_ip = summary["ip"]
+            ingest_key = (broadcaster["name"], stream)
+            old_ip = _last_ingest_ip.get(ingest_key)
+            if old_ip and old_ip != new_ip:
+                connection_status.labels(name=broadcaster["name"], stream=stream, role="broadcaster", ip=old_ip).set(0)
+                ingest_status.labels(name=broadcaster["name"], stream=stream, ip=old_ip).set(0)
+                ingest_jitter.labels(name=broadcaster["name"], stream=stream, ip=old_ip).set(0)
+                ingest_loss.labels(name=broadcaster["name"], stream=stream, ip=old_ip).set(0)
+            _last_ingest_ip[ingest_key] = new_ip
+            connection_status.labels(name=broadcaster["name"], stream=stream, role="broadcaster", ip=new_ip).set(summary["status"])
+            ingest_status.labels(name=broadcaster["name"], stream=stream, ip=new_ip).set(summary["status"])
+            ingest_jitter.labels(name=broadcaster["name"], stream=stream, ip=new_ip).set(summary["jitter"])
+            ingest_loss.labels(name=broadcaster["name"], stream=stream, ip=new_ip).set(summary["loss"])
 
     affiliate_client_defs = _build_affiliate_clients(affiliate_clients)
     affiliate_summary: dict[tuple[str, str], dict] = {}
@@ -966,12 +733,7 @@ def _check_health():
     for stream in STREAM_NAMES:
         monitored_outputs = active_outputs.get(stream, set())
         stream_groups = affiliate_client_defs.get(stream, [])
-        preferred_names = {
-            ip: affiliate_name
-            for (auth_stream, ip), (affiliate_name, _ts) in affiliate_auth.items()
-            if auth_stream == stream
-        }
-        for g, ip in _assign_connected_ips(stream_groups, monitored_outputs, preferred_names=preferred_names):
+        for g, ip in _assign_connected_ips(stream_groups, monitored_outputs):
             summary_key = (g["name"], stream)
             existing = affiliate_summary.get(summary_key)
             candidate = {
@@ -992,16 +754,19 @@ def _check_health():
                 if candidate_primary and not existing_primary:
                     affiliate_summary[summary_key] = candidate
 
-            if ip is not None:
-                affiliate_client_status.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip=ip).set(1)
-                affiliate_client_loss.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip=ip).set(output_loss.get((stream, ip), 0))
-                affiliate_client_bytes.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip=ip).set(output_bytes.get((stream, ip), 0))
-                affiliate_client_uptime.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip=ip).set(output_uptime.get((stream, ip), 0))
-            else:
-                affiliate_client_status.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip="none").set(0)
-                affiliate_client_loss.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip="none").set(0)
-                affiliate_client_bytes.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip="none").set(0)
-                affiliate_client_uptime.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip="none").set(0)
+            new_ip = ip if ip is not None else "none"
+            client_key = (g["name"], stream, g["client_name"], g["endpoint_role"])
+            old_ip = _last_client_ip.get(client_key)
+            if old_ip and old_ip != new_ip:
+                affiliate_client_status.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip=old_ip).set(0)
+                affiliate_client_loss.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip=old_ip).set(0)
+                affiliate_client_bytes.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip=old_ip).set(0)
+                affiliate_client_uptime.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip=old_ip).set(0)
+            _last_client_ip[client_key] = new_ip
+            affiliate_client_status.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip=new_ip).set(1 if ip is not None else 0)
+            affiliate_client_loss.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip=new_ip).set(output_loss.get((stream, ip), 0) if ip is not None else 0)
+            affiliate_client_bytes.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip=new_ip).set(output_bytes.get((stream, ip), 0) if ip is not None else 0)
+            affiliate_client_uptime.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip=new_ip).set(output_uptime.get((stream, ip), 0) if ip is not None else 0)
 
     configured_affiliate_pairs = sorted({
         (group["name"], stream)
@@ -1016,11 +781,21 @@ def _check_health():
                 "bytes": 0,
                 "uptime": 0,
             })
-            connection_status.labels(name=affiliate_name, stream=stream, role="operator", ip=summary["ip"]).set(summary["status"])
-            playout_status.labels(name=affiliate_name, stream=stream, ip=summary["ip"]).set(summary["status"])
-            playout_loss.labels(name=affiliate_name, stream=stream, ip=summary["ip"]).set(summary["loss"])
-            playout_bytes.labels(name=affiliate_name, stream=stream, ip=summary["ip"]).set(summary["bytes"])
-            playout_uptime.labels(name=affiliate_name, stream=stream, ip=summary["ip"]).set(summary["uptime"])
+            new_ip = summary["ip"]
+            playout_key = (affiliate_name, stream)
+            old_ip = _last_playout_ip.get(playout_key)
+            if old_ip and old_ip != new_ip:
+                connection_status.labels(name=affiliate_name, stream=stream, role="operator", ip=old_ip).set(0)
+                playout_status.labels(name=affiliate_name, stream=stream, ip=old_ip).set(0)
+                playout_loss.labels(name=affiliate_name, stream=stream, ip=old_ip).set(0)
+                playout_bytes.labels(name=affiliate_name, stream=stream, ip=old_ip).set(0)
+                playout_uptime.labels(name=affiliate_name, stream=stream, ip=old_ip).set(0)
+            _last_playout_ip[playout_key] = new_ip
+            connection_status.labels(name=affiliate_name, stream=stream, role="operator", ip=new_ip).set(summary["status"])
+            playout_status.labels(name=affiliate_name, stream=stream, ip=new_ip).set(summary["status"])
+            playout_loss.labels(name=affiliate_name, stream=stream, ip=new_ip).set(summary["loss"])
+            playout_bytes.labels(name=affiliate_name, stream=stream, ip=new_ip).set(summary["bytes"])
+            playout_uptime.labels(name=affiliate_name, stream=stream, ip=new_ip).set(summary["uptime"])
 
 
 # ── R2 pipeline poller ───────────────────────────────────────────────────────
