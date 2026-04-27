@@ -70,31 +70,31 @@ operator_sessions = Gauge(
 session_bytes = Gauge(
     "mist_operator_session_bytes",
     "Bytes transferred per active operator session",
-    ["stream", "ip", "direction", "connector"],
+    ["stream", "ip", "direction", "connector", "affiliate", "client_name"],
     registry=registry,
 )
 session_uptime = Gauge(
     "mist_operator_session_uptime_seconds",
     "Uptime in seconds of active operator session",
-    ["stream", "ip", "connector"],
+    ["stream", "ip", "connector", "affiliate", "client_name"],
     registry=registry,
 )
 session_pkt_loss = Gauge(
     "mist_session_packet_loss_ratio",
     "Packet loss ratio (lost/sent) for active SRT session",
-    ["stream", "ip", "direction"],
+    ["stream", "ip", "direction", "affiliate", "client_name"],
     registry=registry,
 )
 session_bitrate_kbps = Gauge(
     "mist_operator_session_bitrate_kbps",
     "Current throughput in kbps for active operator session",
-    ["stream", "ip", "direction", "connector"],
+    ["stream", "ip", "direction", "connector", "affiliate", "client_name"],
     registry=registry,
 )
 session_retransmit_rate = Gauge(
     "mist_operator_session_retransmit_rate",
     "Retransmit ratio (retransmitted/sent) for active operator session",
-    ["stream", "ip", "direction", "connector"],
+    ["stream", "ip", "direction", "connector", "affiliate", "client_name"],
     registry=registry,
 )
 
@@ -457,12 +457,15 @@ def _poll_clients():
         key = (stream, direction, connector)
         counts[key] = counts.get(key, 0) + 1
         total_bytes = down_bytes + up_bytes
-        session_bytes.labels(stream=stream, ip=ip, direction=direction, connector=connector).set(total_bytes)
-        session_uptime.labels(stream=stream, ip=ip, connector=connector).set(conntime)
+
+        affiliate, client_name = ("", "") if _is_loopback_ip(ip) else _resolve_session_identity(ip, stream, direction)
+
+        session_bytes.labels(stream=stream, ip=ip, direction=direction, connector=connector, affiliate=affiliate, client_name=client_name).set(total_bytes)
+        session_uptime.labels(stream=stream, ip=ip, connector=connector, affiliate=affiliate, client_name=client_name).set(conntime)
 
         if pkt_count > 0:
             loss_ratio = pkt_lost / pkt_count
-            session_pkt_loss.labels(stream=stream, ip=ip, direction=direction).set(loss_ratio)
+            session_pkt_loss.labels(stream=stream, ip=ip, direction=direction, affiliate=affiliate, client_name=client_name).set(loss_ratio)
             if loss_ratio > PACKET_LOSS_THRESHOLD:
                 log.warning("HIGH PACKET LOSS: stream=%s ip=%s direction=%s loss=%.1f%%",
                             stream, ip, direction, loss_ratio * 100)
@@ -474,16 +477,16 @@ def _poll_clients():
         if prev and (now - prev["ts"]) > 0:
             dt = now - prev["ts"]
             bitrate = max(0, total_bytes - prev["bytes"]) * 8 / (dt * 1000)
-            session_bitrate_kbps.labels(stream=stream, ip=ip, direction=direction, connector=connector).set(bitrate)
+            session_bitrate_kbps.labels(stream=stream, ip=ip, direction=direction, connector=connector, affiliate=affiliate, client_name=client_name).set(bitrate)
             sent_delta = max(0, pkt_count - prev["sent"])
             retrans_delta = max(0, pkt_retransmit - prev["retrans"])
             retransmit_rate = retrans_delta / sent_delta if sent_delta > 0 else 0
-            session_retransmit_rate.labels(stream=stream, ip=ip, direction=direction, connector=connector).set(retransmit_rate)
+            session_retransmit_rate.labels(stream=stream, ip=ip, direction=direction, connector=connector, affiliate=affiliate, client_name=client_name).set(retransmit_rate)
         _prev_poll[rate_key] = {"bytes": total_bytes, "retrans": pkt_retransmit, "sent": pkt_count, "ts": now}
 
         # Check unregistered for all external sessions (input and output) — skip loopback only
         if not _is_loopback_ip(ip):
-            is_registered = _is_registered(ip, stream, direction)
+            is_registered = affiliate != "" or _is_registered(ip, stream, direction)
             session_unregistered.labels(stream=stream, ip=ip, direction=direction, connector=connector).set(
                 0 if is_registered else 1
             )
@@ -731,6 +734,38 @@ def _is_registered(ip: str, stream: str, direction: str) -> bool:
             return True
 
     return False
+
+
+def _resolve_session_identity(ip: str, stream: str, direction: str) -> tuple[str, str]:
+    """Return (affiliate_name, client_name) for an IP+stream+direction, or ("", "") if unknown."""
+    with _pb_lock:
+        broadcaster_feeds = _pb_config["broadcaster_feeds"]
+        broadcasters = _pb_config["broadcasters"]
+        affiliate_clients = _pb_config["affiliate_clients"]
+
+    if direction == "input":
+        for feed in broadcaster_feeds:
+            if feed["stream"] != stream:
+                continue
+            allowed = _allowed_ips(feed["allowed_ips"])
+            if not allowed:
+                for b in broadcasters:
+                    if b["name"] == feed["broadcaster_name"]:
+                        allowed = _allowed_ips(b["allowed_ips"])
+                        break
+            if _ip_allowed(ip, allowed):
+                return feed["broadcaster_name"], feed["feed_role"]
+        return "", ""
+
+    for client in affiliate_clients:
+        if client["stream"] != stream:
+            continue
+        allowed = _allowed_ips(client["allowed_ips"])
+        if not allowed and client["client_name"]:
+            allowed = [client["client_name"]]
+        if _ip_allowed(ip, allowed):
+            return client["affiliate_name"], client["client_name"]
+    return "", ""
 
 
 def _poll_active_streams():
