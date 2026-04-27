@@ -118,6 +118,44 @@ resource "null_resource" "provision_stream_auth" {
   depends_on = [null_resource.provision]
 }
 
+resource "null_resource" "provision_conn_triggers" {
+  triggers = {
+    conn_play  = filemd5("${path.module}/../../scripts/cast-mist-conn-play.sh")
+    conn_close = filemd5("${path.module}/../../scripts/cast-mist-conn-close.sh")
+    vps_ip     = var.vps_ip
+    pb_email   = var.pb_email
+    pb_password = var.pb_password
+  }
+
+  connection {
+    type        = "ssh"
+    host        = var.vps_ip
+    user        = "root"
+    private_key = file(var.ssh_private_key_path)
+    timeout     = "10m"
+  }
+
+  provisioner "file" {
+    source      = "${path.module}/../../scripts/cast-mist-conn-play.sh"
+    destination = "/usr/local/bin/cast-mist-conn-play.sh"
+  }
+
+  provisioner "file" {
+    source      = "${path.module}/../../scripts/cast-mist-conn-close.sh"
+    destination = "/usr/local/bin/cast-mist-conn-close.sh"
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "chmod +x /usr/local/bin/cast-mist-conn-play.sh /usr/local/bin/cast-mist-conn-close.sh",
+      "printf 'PB_URL=http://127.0.0.1:8090\\nPB_EMAIL=${var.pb_email}\\nPB_PASS=${var.pb_password}\\n' > /etc/cast-mist-stream-auth.env",
+      "chmod 600 /etc/cast-mist-stream-auth.env",
+    ]
+  }
+
+  depends_on = [null_resource.provision]
+}
+
 resource "null_resource" "provision_r2_writer" {
   triggers = {
     script = filemd5("${path.module}/../../scripts/cast-r2-writer")

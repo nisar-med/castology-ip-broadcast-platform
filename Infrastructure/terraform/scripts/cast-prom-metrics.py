@@ -216,10 +216,11 @@ _prev_poll: dict[tuple, dict] = {}  # (stream, ip, direction, connector) → {by
 
 _pb_lock = threading.Lock()
 _pb_config = {
-    "broadcasters": [],   # [{"name", "streams": [...], "token_key", "allowed_ips"}]
-    "broadcaster_feeds": [],  # [{"broadcaster_name", "stream", "feed_role", "allowed_ips"}]
-    "affiliate_clients": [],  # [{"affiliate_name", "stream", "client_name", "endpoint_role", "allowed_ips"}]
-    "tokens": set(),      # all valid token_keys
+    "broadcasters": [],      # [{"name", "streams": [...], "token_key", "allowed_ips"}]
+    "broadcaster_feeds": [], # [{"broadcaster_name", "stream", "feed_role", "allowed_ips"}]
+    "affiliate_clients": [], # [{"affiliate_name", "stream", "client_name", "endpoint_role", "allowed_ips"}]
+    "active_sessions": {},   # {(stream, ip): {"affiliate", "client_name"}} — written by CONN_PLAY trigger
+    "tokens": set(),         # all valid token_keys
 }
 
 def _pb_auth() -> str:
@@ -252,6 +253,7 @@ def poll_pb_config():
             broadcaster_feeds = _pb_fetch(token, "broadcaster_feeds")
             affiliates = _pb_fetch(token, "affiliates")
             affiliate_clients = _pb_fetch(token, "affiliate_clients")
+            active_sessions_raw = _pb_fetch(token, "active_sessions")
 
             parsed_broadcasters = []
             for b in broadcasters:
@@ -316,14 +318,26 @@ def poll_pb_config():
                 if b["token_key"]:
                     tokens.add(b["token_key"])
 
+            # active_sessions: keyed by (stream, ip) — written by CONN_PLAY trigger
+            parsed_active_sessions = {}
+            for s in active_sessions_raw:
+                stream = (s.get("stream") or "").strip()
+                ip = (s.get("ip") or "").strip()
+                if stream and ip:
+                    parsed_active_sessions[(stream, ip)] = {
+                        "affiliate": (s.get("affiliate") or "").strip(),
+                        "client_name": (s.get("client_name") or "").strip(),
+                    }
+
             with _pb_lock:
                 _pb_config["broadcasters"] = parsed_broadcasters
                 _pb_config["broadcaster_feeds"] = parsed_broadcaster_feeds
                 _pb_config["affiliate_clients"] = parsed_affiliate_clients
+                _pb_config["active_sessions"] = parsed_active_sessions
                 _pb_config["tokens"] = tokens
 
-            log.info("PocketBase config refreshed: %d broadcasters, %d broadcaster feeds, %d affiliate clients, %d tokens",
-                     len(parsed_broadcasters), len(parsed_broadcaster_feeds), len(parsed_affiliate_clients), len(tokens))
+            log.info("PocketBase config refreshed: %d broadcasters, %d broadcaster feeds, %d affiliate clients, %d active sessions, %d tokens",
+                     len(parsed_broadcasters), len(parsed_broadcaster_feeds), len(parsed_affiliate_clients), len(parsed_active_sessions), len(tokens))
         except Exception as e:
             log.warning("PocketBase config poll error: %s", e)
 
@@ -737,12 +751,25 @@ def _is_registered(ip: str, stream: str, direction: str) -> bool:
 
 
 def _resolve_session_identity(ip: str, stream: str, direction: str) -> tuple[str, str]:
-    """Return (affiliate_name, client_name) for an IP+stream+direction, or ("", "") if unknown."""
+    """Return (affiliate_name, client_name) for an IP+stream+direction, or ("", "") if unknown.
+
+    Priority:
+    1. active_sessions (written by CONN_PLAY trigger at token-auth time) — ground truth
+    2. IP matching against PocketBase config — fallback for sessions that predate the trigger
+       or whose CONN_PLAY record hasn't been polled yet (up to HEALTH_POLL_SECS lag).
+    """
     with _pb_lock:
+        active_sessions = _pb_config["active_sessions"]
         broadcaster_feeds = _pb_config["broadcaster_feeds"]
         broadcasters = _pb_config["broadcasters"]
         affiliate_clients = _pb_config["affiliate_clients"]
 
+    # 1. Token-based identity from CONN_PLAY trigger — immune to IP aliasing bugs
+    session = active_sessions.get((stream, ip))
+    if session and session.get("affiliate"):
+        return session["affiliate"], session.get("client_name", "")
+
+    # 2. IP matching fallback
     if direction == "input":
         for feed in broadcaster_feeds:
             if feed["stream"] != stream:

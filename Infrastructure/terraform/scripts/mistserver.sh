@@ -133,9 +133,17 @@ cfg['config']['protocols'] = [
     {"connector": "TSSRT", "online": 1, "port": ${SRT_INGEST_PORT}},
 ]
 
-# PLAY_REWRITE trigger — SRT + HLS stream authentication
+# PLAY_REWRITE — SRT + HLS auth (sync: blocks until script exits, returns stream name)
+# CONN_PLAY  — session identity written to PocketBase active_sessions (async, non-blocking)
+# CONN_CLOSE — active_sessions cleanup + session_audit append (async, non-blocking)
 cfg['config'].setdefault('triggers', {})['PLAY_REWRITE'] = [
     {"handler": "/usr/local/bin/cast-mist-stream-auth.sh", "streams": [], "sync": True}
+]
+cfg['config']['triggers']['CONN_PLAY'] = [
+    {"handler": "/usr/local/bin/cast-mist-conn-play.sh", "streams": [], "sync": False}
+]
+cfg['config']['triggers']['CONN_CLOSE'] = [
+    {"handler": "/usr/local/bin/cast-mist-conn-close.sh", "streams": [], "sync": False}
 ]
 
 # External R2 writer
