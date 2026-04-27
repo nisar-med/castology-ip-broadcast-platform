@@ -147,6 +147,36 @@ resource "null_resource" "provision_r2_writer" {
   depends_on = [null_resource.provision]
 }
 
+resource "null_resource" "provision_kernel_tune" {
+  triggers = {
+    script = filemd5("${path.module}/../../scripts/cast-vps-kernel-tune.sh")
+    vps_ip = var.vps_ip
+  }
+
+  connection {
+    type        = "ssh"
+    host        = var.vps_ip
+    user        = "root"
+    private_key = file(var.ssh_private_key_path)
+    timeout     = "10m"
+  }
+
+  provisioner "file" {
+    source      = "${path.module}/../../scripts/cast-vps-kernel-tune.sh"
+    destination = "/tmp/cast-vps-kernel-tune.sh"
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "chmod +x /tmp/cast-vps-kernel-tune.sh",
+      "/tmp/cast-vps-kernel-tune.sh",
+    ]
+  }
+
+  # Runs independently — no dependency on MistServer install order.
+  # Kernel settings are applied before MistServer starts accepting streams.
+}
+
 resource "null_resource" "provision_stream_probe" {
   triggers = {
     script = filemd5("${path.module}/../../scripts/cast-stream-probe.sh")
