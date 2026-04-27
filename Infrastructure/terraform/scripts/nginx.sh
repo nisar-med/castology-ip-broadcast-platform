@@ -79,6 +79,51 @@ echo "==> Installing nginx"
 apt-get update -qq
 apt-get install -y -qq nginx
 
+# ---------------------------------------------------------------------------
+# Global nginx tuning for 750 concurrent HLS clients
+#
+# HLS polling pattern: each client requests index.m3u8 every 6 s plus one
+# segment fetch per interval → ~250 req/s steady state, spikes to ~1000/s.
+# worker_processes auto uses one worker per CPU core.
+# worker_connections 4096 per worker gives headroom well above 750 clients.
+# multi_accept on: accept all pending connections per event rather than one.
+# keepalive_timeout 15s: HLS clients don't benefit from long-lived connections
+#   and holding 750 × 75s (default) ties up workers unnecessarily.
+# ---------------------------------------------------------------------------
+cat > /etc/nginx/nginx.conf << 'EOF'
+user www-data;
+worker_processes auto;
+pid /run/nginx.pid;
+include /etc/nginx/modules-enabled/*.conf;
+
+events {
+    worker_connections 4096;
+    multi_accept on;
+    use epoll;
+}
+
+http {
+    sendfile            on;
+    tcp_nopush          on;
+    tcp_nodelay         on;
+    keepalive_timeout   15;
+    keepalive_requests  100;
+    types_hash_max_size 2048;
+    server_tokens       off;
+
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+
+    access_log /var/log/nginx/access.log;
+    error_log  /var/log/nginx/error.log;
+
+    gzip off;
+
+    include /etc/nginx/conf.d/*.conf;
+    include /etc/nginx/sites-enabled/*;
+}
+EOF
+
 # Helper: check if a site name is in NGINX_SITES
 site_enabled() {
   echo "$NGINX_SITES" | tr ',' '\n' | grep -qx "$1"
@@ -90,8 +135,16 @@ site_enabled() {
 if site_enabled "play"; then
   echo "==> Configuring play.castology.tv"
   cat > /etc/nginx/sites-available/play.castology.tv << 'EOF'
+# Upstream pool — keepalive reuses connections to MistServer's HTTP listener.
+# 64 idle keepalive connections covers bursts without opening a new TCP
+# connection per HLS segment fetch.
+upstream mist_hls {
+    server 127.0.0.1:8080;
+    keepalive 64;
+}
+
 server {
-    listen 80;
+    listen 80 backlog=8192;
     server_name play.castology.tv;
 
     real_ip_header    CF-Connecting-IP;
@@ -101,16 +154,17 @@ server {
     proxy_request_buffering off;
 
     location / {
-        proxy_pass         http://127.0.0.1:8080;
+        proxy_pass         http://mist_hls;
         proxy_http_version 1.1;
+        proxy_set_header   Connection        "";
         proxy_set_header   Host              $host;
         proxy_set_header   X-Real-IP         $remote_addr;
         proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
         proxy_set_header   X-Forwarded-Proto $scheme;
 
-        proxy_read_timeout    3600s;
-        proxy_send_timeout    3600s;
-        proxy_connect_timeout 10s;
+        proxy_read_timeout    30s;
+        proxy_send_timeout    30s;
+        proxy_connect_timeout 5s;
 
         add_header Access-Control-Allow-Origin  * always;
         add_header Access-Control-Allow-Methods "GET, OPTIONS" always;
