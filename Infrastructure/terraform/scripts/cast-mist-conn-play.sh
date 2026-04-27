@@ -16,7 +16,7 @@ IFS= read -r request_url
 
 client_ip=$(echo "$client_ip" | sed 's/\[//g; s/\]//g; s/::ffff://g; s/:[0-9]*$//')
 
-# Only track SRT and HLS output sessions — skip loopback and unknown connectors
+# Skip loopback and unknown connectors
 if [[ "$client_ip" == "127.0.0.1" || "$client_ip" == "::1" ]]; then
     exit 0
 fi
@@ -32,6 +32,12 @@ if [[ "$connector" == "TSSRT" ]]; then
 elif [[ "$connector" == "HLS" ]]; then
     sname="$stream"
     token=$(echo "$request_url" | grep -o 'token=[^&]*' | cut -d= -f2)
+fi
+
+# Skip broadcaster ingest sessions — token resolves to broadcasters collection, not affiliates.
+# Input identity is correctly resolved via broadcaster_feeds IP matching; no active_sessions needed.
+if [[ -z "$token" ]]; then
+    exit 0
 fi
 
 # Authenticate with PocketBase
@@ -51,8 +57,10 @@ if [[ -n "$token" ]]; then
     affiliate=$(echo "$affiliate_json" | grep -o '"name":"[^"]*"' | head -1 | cut -d'"' -f4)
 
     if [[ -n "$affiliate" ]]; then
+        # No active=true filter — client record may be inactive (e.g. test/suspended)
+        # but identity must still resolve correctly from the token used at connect time.
         client_filter=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" \
-            "affiliate_name=\"$affiliate\" && stream=\"$sname\" && active=true")
+            "affiliate_name=\"$affiliate\" && stream=\"$sname\"")
         client_json=$(curl -sf "$PB_URL/api/collections/affiliate_clients/records?filter=$client_filter&perPage=1" \
             -H "Authorization: Bearer $pb_token")
         client_name=$(echo "$client_json" | grep -o '"client_name":"[^"]*"' | head -1 | cut -d'"' -f4)
