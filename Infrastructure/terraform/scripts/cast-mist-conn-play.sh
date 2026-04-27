@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# MistServer CONN_PLAY trigger — fires after PLAY_REWRITE succeeds.
+# MistServer CONN_PLAY trigger — fires after PLAY_REWRITE succeeds (output)
+# or when an ingest push connects (input).
 # Writes to PocketBase active_sessions and session_audit (async, non-blocking).
 # Response is ignored by MistServer (sync: false).
 
@@ -24,7 +25,7 @@ if [[ "$connector" != "TSSRT" && "$connector" != "HLS" ]]; then
     exit 0
 fi
 
-# Extract token from request_url (same logic as cast-mist-stream-auth.sh)
+# Extract stream name and token
 if [[ "$connector" == "TSSRT" ]]; then
     sname="${stream%%/*}"
     token="${stream#*/}"
@@ -34,44 +35,61 @@ elif [[ "$connector" == "HLS" ]]; then
     token=$(echo "$request_url" | grep -o 'token=[^&]*' | cut -d= -f2)
 fi
 
-# Skip broadcaster ingest sessions — token resolves to broadcasters collection, not affiliates.
-# Input identity is correctly resolved via broadcaster_feeds IP matching; no active_sessions needed.
-if [[ -z "$token" ]]; then
-    exit 0
-fi
+# Skip if no token — anonymous or unrecognised session
+[[ -z "$token" ]] && exit 0
 
 # Authenticate with PocketBase
 pb_token=$(curl -sf -X POST "$PB_URL/api/collections/_superusers/auth-with-password" \
     -H "Content-Type: application/json" \
     -d "{\"identity\":\"$PB_EMAIL\",\"password\":\"$PB_PASS\"}" \
     | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
-
 [[ -z "$pb_token" ]] && exit 0
 
-# Resolve affiliate + client_name from token
-if [[ -n "$token" ]]; then
-    filter=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" \
-        "token_key=\"$token\" && active=true")
-    affiliate_json=$(curl -sf "$PB_URL/api/collections/affiliates/records?filter=$filter&perPage=1" \
+# ── Resolve identity from token ───────────────────────────────────────────────
+# Try affiliates first (output sessions)
+af_filter=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" \
+    "token_key=\"$token\" && active=true")
+af_json=$(curl -sf "$PB_URL/api/collections/affiliates/records?filter=$af_filter&perPage=1" \
+    -H "Authorization: Bearer $pb_token")
+affiliate=$(echo "$af_json" | grep -o '"name":"[^"]*"' | head -1 | cut -d'"' -f4)
+
+if [[ -n "$affiliate" ]]; then
+    direction="output"
+    # No active=true — client may be inactive but identity must resolve from token
+    cl_filter=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" \
+        "affiliate_name=\"$affiliate\" && stream=\"$sname\"")
+    cl_json=$(curl -sf "$PB_URL/api/collections/affiliate_clients/records?filter=$cl_filter&perPage=1" \
         -H "Authorization: Bearer $pb_token")
-    affiliate=$(echo "$affiliate_json" | grep -o '"name":"[^"]*"' | head -1 | cut -d'"' -f4)
+    client_name=$(echo "$cl_json" | grep -o '"client_name":"[^"]*"' | head -1 | cut -d'"' -f4)
+else
+    # Try broadcasters (input/ingest sessions)
+    br_filter=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" \
+        "token_key=\"$token\" && active=true")
+    br_json=$(curl -sf "$PB_URL/api/collections/broadcasters/records?filter=$br_filter&perPage=1" \
+        -H "Authorization: Bearer $pb_token")
+    affiliate=$(echo "$br_json" | grep -o '"name":"[^"]*"' | head -1 | cut -d'"' -f4)
 
     if [[ -n "$affiliate" ]]; then
-        # No active=true filter — client record may be inactive (e.g. test/suspended)
-        # but identity must still resolve correctly from the token used at connect time.
-        client_filter=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" \
-            "affiliate_name=\"$affiliate\" && stream=\"$sname\"")
-        client_json=$(curl -sf "$PB_URL/api/collections/affiliate_clients/records?filter=$client_filter&perPage=1" \
+        direction="input"
+        # Use feed_role as client_name for consistency with exporter IP-matching fallback
+        feed_filter=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" \
+            "broadcaster_name=\"$affiliate\" && stream=\"$sname\"")
+        feed_json=$(curl -sf "$PB_URL/api/collections/broadcaster_feeds/records?filter=$feed_filter&perPage=1" \
             -H "Authorization: Bearer $pb_token")
-        client_name=$(echo "$client_json" | grep -o '"client_name":"[^"]*"' | head -1 | cut -d'"' -f4)
+        client_name=$(echo "$feed_json" | grep -o '"feed_role":"[^"]*"' | head -1 | cut -d'"' -f4)
+        client_name="${client_name:-primary}"
     fi
 fi
 
-affiliate="${affiliate:-unknown}"
+# Skip if token doesn't match any known broadcaster or affiliate
+[[ -z "$affiliate" ]] && exit 0
+
+affiliate="${affiliate}"
 client_name="${client_name:-unknown}"
+direction="${direction:-output}"
 now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-# Upsert active_sessions — delete existing record for this stream+ip+vps then insert fresh
+# Upsert active_sessions
 existing_id=$(curl -sf "$PB_URL/api/collections/active_sessions/records?filter=$(python3 -c \
     "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" \
     "stream=\"$sname\" && ip=\"$client_ip\" && vps=\"$VPS_ID\"")&perPage=1" \
@@ -86,15 +104,15 @@ curl -sf -X POST "$PB_URL/api/collections/active_sessions/records" \
     -H "Authorization: Bearer $pb_token" \
     -H "Content-Type: application/json" \
     -d "{\"stream\":\"$sname\",\"ip\":\"$client_ip\",\"connector\":\"$connector\",\
-\"affiliate\":\"$affiliate\",\"client_name\":\"$client_name\",\
+\"direction\":\"$direction\",\"affiliate\":\"$affiliate\",\"client_name\":\"$client_name\",\
 \"token\":\"$token\",\"vps\":\"$VPS_ID\",\"connected_at\":\"$now\"}" > /dev/null
 
-# Append session_audit connected event
+# Append session_audit
 curl -sf -X POST "$PB_URL/api/collections/session_audit/records" \
     -H "Authorization: Bearer $pb_token" \
     -H "Content-Type: application/json" \
     -d "{\"stream\":\"$sname\",\"ip\":\"$client_ip\",\"connector\":\"$connector\",\
-\"affiliate\":\"$affiliate\",\"client_name\":\"$client_name\",\
+\"direction\":\"$direction\",\"affiliate\":\"$affiliate\",\"client_name\":\"$client_name\",\
 \"token\":\"$token\",\"event\":\"connected\",\"vps\":\"$VPS_ID\",\"event_at\":\"$now\"}" > /dev/null
 
 exit 0

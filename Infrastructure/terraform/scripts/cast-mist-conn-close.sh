@@ -45,6 +45,7 @@ session_id=$(echo "$session_json"   | grep -o '"id":"[^"]*"'           | head -1
 affiliate=$(echo "$session_json"    | grep -o '"affiliate":"[^"]*"'    | head -1 | cut -d'"' -f4)
 client_name=$(echo "$session_json"  | grep -o '"client_name":"[^"]*"'  | head -1 | cut -d'"' -f4)
 token=$(echo "$session_json"        | grep -o '"token":"[^"]*"'        | head -1 | cut -d'"' -f4)
+direction=$(echo "$session_json"    | grep -o '"direction":"[^"]*"'    | head -1 | cut -d'"' -f4)
 connected_at=$(echo "$session_json" | grep -o '"connected_at":"[^"]*"' | head -1 | cut -d'"' -f4)
 
 # If no active_sessions record exists this was a denied connection — skip audit
@@ -68,8 +69,9 @@ curl -sf -X POST "$PB_URL/api/collections/session_audit/records" \
     -H "Authorization: Bearer $pb_token" \
     -H "Content-Type: application/json" \
     -d "{\"stream\":\"$sname\",\"ip\":\"$client_ip\",\"connector\":\"$connector\",\
-\"affiliate\":\"${affiliate:-unknown}\",\"client_name\":\"${client_name:-unknown}\",\
-\"token\":\"$token\",\"event\":\"disconnected\",\"duration_seconds\":$duration_seconds,\
+\"direction\":\"${direction:-output}\",\"affiliate\":\"${affiliate:-unknown}\",\
+\"client_name\":\"${client_name:-unknown}\",\"token\":\"$token\",\
+\"event\":\"disconnected\",\"duration_seconds\":$duration_seconds,\
 \"vps\":\"$VPS_ID\",\"event_at\":\"$now\"}" > /dev/null
 
 exit 0

@@ -764,12 +764,13 @@ def _resolve_session_identity(ip: str, stream: str, direction: str) -> tuple[str
         broadcasters = _pb_config["broadcasters"]
         affiliate_clients = _pb_config["affiliate_clients"]
 
-    # 1. Token-based identity from CONN_PLAY trigger — immune to IP aliasing bugs
+    # 1. Token-based identity from CONN_PLAY trigger — immune to IP aliasing bugs.
+    #    active_sessions stores both input (broadcaster) and output (affiliate) sessions.
     session = active_sessions.get((stream, ip))
     if session and session.get("affiliate"):
         return session["affiliate"], session.get("client_name", "")
 
-    # 2. IP matching fallback
+    # 2. IP matching fallback (covers sessions that predate CONN_PLAY or haven't polled yet)
     if direction == "input":
         for feed in broadcaster_feeds:
             if feed["stream"] != stream:
