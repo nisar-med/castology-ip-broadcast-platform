@@ -45,8 +45,6 @@ services:
       PB_PASS: ${PB_ADMIN_PASSWORD}
     volumes:
       - ./config/mistserver/mistserver.conf:/etc/mistserver.conf:rw
-      - ./scripts/cast-mist-stream-auth.sh:/usr/local/bin/cast-mist-stream-auth.sh:ro
-      - ./scripts/cast-r2-writer:/usr/local/bin/cast-r2-writer:ro
       - mistserver-data:/var/lib/mistserver
     ports:
       - "4242:4242"          # API (loopback — accessed via SSH tunnel)
