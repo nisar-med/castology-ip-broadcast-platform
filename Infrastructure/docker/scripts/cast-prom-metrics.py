@@ -32,6 +32,8 @@ METRICS_PORT      = int(os.environ.get("EXPORTER_PORT", "9101"))
 MIST_API_PORT     = os.environ.get("MIST_API_PORT", "4242")
 MIST_API_HOST     = os.environ.get("MIST_API_HOST", "127.0.0.1")
 MIST_API_URL      = f"http://{MIST_API_HOST}:{MIST_API_PORT}/api"
+MIST_USERNAME     = os.environ.get("MIST_USERNAME", "admin")
+MIST_PASSWORD     = os.environ.get("MIST_PASSWORD", "")
 PB_URL            = os.environ.get("PB_URL", "http://127.0.0.1:8090")
 PB_EMAIL          = os.environ.get("PB_EMAIL", "admin@castology.tv")
 PB_PASS           = os.environ.get("PB_PASS", "")
@@ -346,12 +348,26 @@ def _stream_names() -> list[str]:
 
 # ── MistServer API helpers ────────────────────────────────────────────────────
 
-def mist_post(payload: dict) -> dict:
+def _mist_request(payload: dict) -> dict:
     data = json.dumps(payload).encode()
     req = urllib.request.Request(MIST_API_URL, data=data,
                                   headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=5) as resp:
         return json.loads(resp.read())
+
+def mist_post(payload: dict) -> dict:
+    if not MIST_PASSWORD:
+        return _mist_request(payload)
+    # Step 1: get challenge
+    resp = _mist_request({})
+    challenge = resp.get("authorize", {}).get("challenge", "")
+    if not challenge:
+        return resp
+    # Step 2: MD5(password + challenge)
+    import hashlib
+    h = hashlib.md5((MIST_PASSWORD + challenge).encode()).hexdigest()
+    # Step 3: send auth + payload together
+    return _mist_request({"authorize": {"username": MIST_USERNAME, "password": h}, **payload})
 
 
 # ── Session + stream health poller ───────────────────────────────────────────

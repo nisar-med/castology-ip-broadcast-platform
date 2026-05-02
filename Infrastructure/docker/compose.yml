@@ -100,6 +100,8 @@ services:
       EXPORTER_PORT: ${EXPORTER_PORT:-9101}
       MIST_API_HOST: "mistserver"
       MIST_API_PORT: "4242"
+      MIST_USERNAME: ${MIST_USERNAME:-admin}
+      MIST_PASSWORD: ${MIST_PASSWORD}
       PB_URL: "http://pocketbase:8090"
       PB_EMAIL: ${PB_ADMIN_EMAIL}
       PB_PASS: ${PB_ADMIN_PASSWORD}
