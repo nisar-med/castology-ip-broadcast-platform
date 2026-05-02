@@ -499,18 +499,25 @@ def _build_affiliate_clients(affiliate_clients: list[dict], stream_names: list[s
 
 
 def _is_test_client_session(ip: str, stream: str) -> bool:
+    """Return True only if the IP matches a test record but NO non-test record for this stream.
+    This allows an IP that is a test client for one affiliate to still appear as a real
+    client for a different affiliate on the same stream."""
     with _pb_lock:
         affiliate_clients = list(_pb_config["affiliate_clients"])
 
+    matched_test = False
     for client in affiliate_clients:
-        if client["stream"] != stream or not client.get("is_test_client"):
+        if client["stream"] != stream:
             continue
         allowed = _allowed_ips(client["allowed_ips"])
         if not allowed and client["client_name"]:
             allowed = [client["client_name"]]
-        if _ip_allowed(ip, allowed):
-            return True
-    return False
+        if not _ip_allowed(ip, allowed):
+            continue
+        if not client.get("is_test_client"):
+            return False  # has a real (non-test) record — not a test-only session
+        matched_test = True
+    return matched_test
 
 
 def _is_registered(ip: str, stream: str, direction: str) -> bool:
