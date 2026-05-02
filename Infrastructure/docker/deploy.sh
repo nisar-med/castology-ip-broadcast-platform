@@ -40,26 +40,20 @@ echo "Docker installed: $(docker --version)"
 REMOTE
 
 # ---------------------------------------------------------------------------
-echo "==> [2/6] Cloning repo"
+echo "==> [2/6] Syncing repo to VPS"
 # ---------------------------------------------------------------------------
-REMOTE_URL=$(git -C "${REPO_ROOT}" remote get-url origin 2>/dev/null || echo "")
-if [ -z "${REMOTE_URL}" ]; then
-  echo "ERROR: No git remote found. Push your repo to a remote first."
-  exit 1
-fi
-
-ssh_run bash -s -- "${REPO_DIR}" "${REMOTE_URL}" << 'REMOTE'
-set -euo pipefail
-REPO_DIR="$1"
-REMOTE_URL="$2"
-if [ -d "${REPO_DIR}/.git" ]; then
-  echo "Repo exists — pulling latest"
-  git -C "${REPO_DIR}" pull --ff-only
-else
-  echo "Cloning ${REMOTE_URL} → ${REPO_DIR}"
-  git clone "${REMOTE_URL}" "${REPO_DIR}"
-fi
-REMOTE
+ssh_run mkdir -p "${REPO_DIR}"
+rsync -az --delete \
+  --exclude='.git' \
+  --exclude='Infrastructure/docker/.env' \
+  --exclude='Infrastructure/terraform/.terraform' \
+  --exclude='Infrastructure/terraform/terraform.tfstate*' \
+  --exclude='__pycache__' \
+  --exclude='*.pyc' \
+  -e "ssh -o StrictHostKeyChecking=no" \
+  "${REPO_ROOT}/" \
+  root@"${VPS_IP}":"${REPO_DIR}/"
+echo "    Repo synced"
 
 # ---------------------------------------------------------------------------
 echo "==> [3/6] Copying .env"
@@ -106,11 +100,11 @@ check() {
   fi
 }
 
-check "MistServer API"     "http://localhost:4242/api"          '"online"'
+check "MistServer API"     "http://localhost:4242/api"          '"challenge"'
 check "PocketBase"         "http://localhost:8090/api/health"   "healthy"
 check "Prometheus"         "http://localhost:9090/-/healthy"    "Healthy"
 check "Grafana"            "http://localhost:3000/api/health"   "ok"
-check "nginx"              "http://localhost:80/"               ""
+check "nginx"              "http://localhost:${NGINX_PORT:-8888}/" ""
 
 exit $fail
 REMOTE
