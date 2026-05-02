@@ -363,9 +363,10 @@ def mist_post(payload: dict) -> dict:
     challenge = resp.get("authorize", {}).get("challenge", "")
     if not challenge:
         return resp
-    # Step 2: MD5(password + challenge)
+    # Step 2: MD5(MD5(password) + challenge)
     import hashlib
-    h = hashlib.md5((MIST_PASSWORD + challenge).encode()).hexdigest()
+    pass_md5 = hashlib.md5(MIST_PASSWORD.encode()).hexdigest()
+    h = hashlib.md5((pass_md5 + challenge).encode()).hexdigest()
     # Step 3: send auth + payload together
     return _mist_request({"authorize": {"username": MIST_USERNAME, "password": h}, **payload})
 
