@@ -2,12 +2,12 @@
 import boto3, os, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-BUCKET    = "castology-hls"
-ENDPOINT  = "https://fbbaa77537af65a6d82c5034be37366f.r2.cloudflarestorage.com"
-ACCESS_KEY = "f17c29df3dc5eada065e25202efdfbab"
-SECRET_KEY = "b12b23785cfcc78c6ae6e34655424c807a4f53f38aacbe0ad950e618b54fc845"
-HLS_BASE  = "/var/lib/mist-hls"
-MAX_AGE_S = 120  # 2 minutes
+BUCKET     = os.environ["R2_BUCKET"]
+ENDPOINT   = os.environ["R2_ENDPOINT"]
+ACCESS_KEY = os.environ["R2_ACCESS_KEY"]
+SECRET_KEY = os.environ["R2_SECRET_KEY"]
+HLS_BASE   = os.environ.get("HLS_BASE", "/var/lib/mistserver/hls")
+MAX_AGE_S  = int(os.environ.get("HLS_MAX_AGE_S", "120"))
 
 client = boto3.client('s3', endpoint_url=ENDPOINT,
                       aws_access_key_id=ACCESS_KEY,
