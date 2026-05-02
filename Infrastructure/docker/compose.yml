@@ -39,6 +39,8 @@ services:
         hard: 8192
     environment:
       PROMETHEUS_PASSPHRASE: ${PROMETHEUS_PASSPHRASE}
+      MIST_USERNAME: ${MIST_USERNAME:-admin}
+      MIST_PASSWORD: ${MIST_PASSWORD}
       SRT_INGEST_PORT: ${SRT_INGEST_PORT:-1235}
       PB_URL: "http://pocketbase:8090"
       PB_EMAIL: ${PB_ADMIN_EMAIL}
