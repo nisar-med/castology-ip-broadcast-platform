@@ -42,12 +42,7 @@ VPS_ID = os.environ.get("VPS_ID", VPS_ID)
 
 
 def log(message: str) -> None:
-    subprocess.run(
-        ["logger", "-t", LOG_TAG, message],
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    print(f"{utc_now()} {LOG_TAG}: {message}", file=sys.stderr, flush=True)
 
 
 def utc_now() -> str:
