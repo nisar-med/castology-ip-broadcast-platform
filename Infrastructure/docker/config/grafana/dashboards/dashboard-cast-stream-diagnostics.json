@@ -11,7 +11,11 @@
       "id": 1,
       "panels": [],
       "title": "Broadcaster \u2014 Ingest",
-      "type": "row"
+      "type": "row",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      }
     },
     {
       "fieldConfig": {
@@ -49,7 +53,11 @@
         }
       ],
       "title": "Ingest Bitrate (kbps)",
-      "type": "timeseries"
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      }
     },
     {
       "fieldConfig": {
@@ -107,7 +115,11 @@
         }
       ],
       "title": "Ingest Packet Loss %",
-      "type": "timeseries"
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      }
     },
     {
       "fieldConfig": {
@@ -165,7 +177,11 @@
         }
       ],
       "title": "Ingest Retransmit Rate %",
-      "type": "timeseries"
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      }
     },
     {
       "collapsed": false,
@@ -178,7 +194,11 @@
       "id": 5,
       "panels": [],
       "title": "VPS \u2014 Local Resources",
-      "type": "row"
+      "type": "row",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      }
     },
     {
       "fieldConfig": {
@@ -236,7 +256,11 @@
         }
       ],
       "title": "CPU %",
-      "type": "timeseries"
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      }
     },
     {
       "fieldConfig": {
@@ -294,7 +318,11 @@
         }
       ],
       "title": "Memory Used %",
-      "type": "timeseries"
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      }
     },
     {
       "fieldConfig": {
@@ -352,7 +380,11 @@
         }
       ],
       "title": "SHM Used %",
-      "type": "timeseries"
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      }
     },
     {
       "fieldConfig": {
@@ -390,7 +422,11 @@
         }
       ],
       "title": "Log Events / min",
-      "type": "timeseries"
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      }
     },
     {
       "collapsed": false,
@@ -403,7 +439,11 @@
       "id": 10,
       "panels": [],
       "title": "Affiliate \u2014 Output",
-      "type": "row"
+      "type": "row",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      }
     },
     {
       "fieldConfig": {
@@ -441,7 +481,11 @@
         }
       ],
       "title": "Output Bitrate (kbps)",
-      "type": "timeseries"
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      }
     },
     {
       "fieldConfig": {
@@ -499,7 +543,11 @@
         }
       ],
       "title": "Output Packet Loss %",
-      "type": "timeseries"
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      }
     },
     {
       "fieldConfig": {
@@ -557,7 +605,11 @@
         }
       ],
       "title": "Output Retransmit Rate %",
-      "type": "timeseries"
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      }
     },
     {
       "fieldConfig": {
@@ -595,7 +647,11 @@
         }
       ],
       "title": "Session Uptime (s)",
-      "type": "timeseries"
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      }
     },
     {
       "collapsed": false,
@@ -608,7 +664,11 @@
       "id": 15,
       "panels": [],
       "title": "Affiliate Client Detail",
-      "type": "row"
+      "type": "row",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      }
     },
     {
       "datasource": {

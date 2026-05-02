@@ -261,7 +261,11 @@
           }
         }
       ],
-      "type": "table"
+      "type": "table",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      }
     },
     {
       "fieldConfig": {
@@ -493,7 +497,11 @@
           }
         }
       ],
-      "type": "table"
+      "type": "table",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      }
     },
     {
       "fieldConfig": {
@@ -662,7 +670,11 @@
           }
         }
       ],
-      "type": "table"
+      "type": "table",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      }
     }
   ],
   "refresh": "10s",

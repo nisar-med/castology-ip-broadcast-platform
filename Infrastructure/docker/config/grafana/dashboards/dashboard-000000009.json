@@ -82,7 +82,11 @@
           "intervalFactor": 1,
           "legendFormat": "",
           "refId": "A",
-          "step": 30
+          "step": 30,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
         }
       ],
       "thresholds": "60,90",
@@ -171,7 +175,11 @@
           "intervalFactor": 1,
           "legendFormat": "",
           "refId": "A",
-          "step": 30
+          "step": 30,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
         }
       ],
       "thresholds": "60,90",
@@ -259,7 +267,11 @@
           "intervalFactor": 1,
           "legendFormat": "",
           "refId": "A",
-          "step": 30
+          "step": 30,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
         }
       ],
       "thresholds": "1,1",
@@ -347,7 +359,11 @@
           "intervalFactor": 1,
           "legendFormat": "",
           "refId": "A",
-          "step": 30
+          "step": 30,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
         }
       ],
       "thresholds": "1,1",
@@ -435,7 +451,11 @@
           "intervalFactor": 1,
           "legendFormat": "",
           "refId": "A",
-          "step": 30
+          "step": 30,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
         }
       ],
       "thresholds": "1,1",
@@ -518,7 +538,11 @@
           "format": "time_series",
           "instant": false,
           "intervalFactor": 1,
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
         }
       ],
       "thresholds": "",
@@ -533,7 +557,11 @@
           "value": "null"
         }
       ],
-      "valueName": "current"
+      "valueName": "current",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      }
     },
     {
       "cacheTimeout": null,
@@ -606,7 +634,11 @@
           "legendFormat": "",
           "metric": "mist_sessions_count",
           "refId": "A",
-          "step": 60
+          "step": 60,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
         }
       ],
       "thresholds": "",
@@ -688,7 +720,11 @@
           "legendFormat": "CPU percent",
           "metric": "mist_cpu",
           "refId": "A",
-          "step": 10
+          "step": 10,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
         },
         {
           "expr": "mist_mem_used{instance=\"$srv\"} / mist_mem_total{instance=\"$srv\"} * 100",
@@ -697,7 +733,11 @@
           "legendFormat": "RAM percent",
           "metric": "mist",
           "refId": "B",
-          "step": 10
+          "step": 10,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
         },
         {
           "expr": "mist_mem_used{instance=\"$srv\"}",
@@ -706,7 +746,11 @@
           "intervalFactor": 2,
           "legendFormat": "RAM bytes",
           "refId": "C",
-          "step": 10
+          "step": 10,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
         },
         {
           "expr": "mist_shm_used{instance=\"$srv\"}",
@@ -715,7 +759,11 @@
           "intervalFactor": 2,
           "legendFormat": "SHM bytes",
           "refId": "D",
-          "step": 10
+          "step": 10,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
         },
         {
           "expr": "mist_shm_used{instance=\"$srv\"} / mist_shm_total{instance=\"$srv\"} * 100",
@@ -724,7 +772,11 @@
           "legendFormat": "SHM percent",
           "metric": "mist",
           "refId": "E",
-          "step": 10
+          "step": 10,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
         }
       ],
       "thresholds": [],
@@ -814,7 +866,11 @@
           "format": "time_series",
           "intervalFactor": 1,
           "legendFormat": "{{output}}",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
         }
       ],
       "thresholds": [],
@@ -856,6 +912,10 @@
       "yaxis": {
         "align": false,
         "alignLevel": null
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
       }
     },
     {
@@ -922,14 +982,22 @@
           "legendFormat": "{{sessType}}",
           "metric": "mist_se",
           "refId": "A",
-          "step": 10
+          "step": 10,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
         },
         {
           "expr": "sum(mist_sessions{instance=\"$srv\",sessType=\"viewers\"})",
           "format": "time_series",
           "intervalFactor": 1,
           "legendFormat": "Viewers (all streams)",
-          "refId": "B"
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
         }
       ],
       "thresholds": [],
@@ -1034,7 +1102,11 @@
           "legendFormat": "Download",
           "metric": "mist",
           "refId": "A",
-          "step": 10
+          "step": 10,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
         },
         {
           "expr": "irate(mist_bw_total{instance=\"$srv\",direction=\"up\"}[1m])*8",
@@ -1042,7 +1114,11 @@
           "intervalFactor": 2,
           "legendFormat": "Upload",
           "refId": "B",
-          "step": 10
+          "step": 10,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
         }
       ],
       "thresholds": [],
@@ -1139,7 +1215,11 @@
           "instant": false,
           "intervalFactor": 1,
           "legendFormat": "{{instance}} {{trigger}}",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
         }
       ],
       "thresholds": [],
@@ -1182,6 +1262,10 @@
       "yaxis": {
         "align": false,
         "alignLevel": null
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
       }
     },
     {
@@ -1244,7 +1328,11 @@
           "legendFormat": "{{sessType}} sessions",
           "metric": "mist",
           "refId": "A",
-          "step": 10
+          "step": 10,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
         },
         {
           "expr": "increase(mist_logs{instance=\"$srv\"}[1m])",
@@ -1252,7 +1340,11 @@
           "intervalFactor": 2,
           "legendFormat": "Logs",
           "refId": "B",
-          "step": 10
+          "step": 10,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
         }
       ],
       "thresholds": [],
@@ -1387,7 +1479,11 @@
           "format": "time_series",
           "intervalFactor": 1,
           "legendFormat": "{{instance}} {{trigger}}",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
         }
       ],
       "thresholds": [],
@@ -1430,6 +1526,10 @@
       "yaxis": {
         "align": false,
         "alignLevel": null
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
       }
     },
     {
@@ -1483,7 +1583,11 @@
           "format": "time_series",
           "intervalFactor": 1,
           "legendFormat": "{{instance}} {{trigger}}",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
         }
       ],
       "thresholds": [],
@@ -1525,6 +1629,10 @@
       "yaxis": {
         "align": false,
         "alignLevel": null
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
       }
     }
   ],
