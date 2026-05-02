@@ -147,6 +147,11 @@ services:
       - loki-data:/loki
     networks:
       - internal
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3100/ready | grep -q ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   # -------------------------------------------------------------------------
   # Promtail — Docker log collector
@@ -161,7 +166,8 @@ services:
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
     depends_on:
-      - loki
+      loki:
+        condition: service_healthy
     networks:
       - internal
 
