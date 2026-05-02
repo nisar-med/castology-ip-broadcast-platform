@@ -83,11 +83,12 @@ services:
   # cast-exporter — custom Prometheus exporter (session status, broadcaster feeds)
   # -------------------------------------------------------------------------
   cast-exporter:
-    image: python:3.12-slim
+    build:
+      context: .
+      dockerfile: cast-exporter.Dockerfile
+    image: castology-cast-exporter
     container_name: cast-exporter
     restart: unless-stopped
-    working_dir: /app
-    command: ["sh", "-c", "pip install --quiet prometheus_client && exec python3 cast-prom-metrics.py"]
     environment:
       STREAMS_JSON: ${STREAMS_JSON}
       EXPORTER_PORT: ${EXPORTER_PORT:-9101}
@@ -96,8 +97,6 @@ services:
       PB_URL: "http://pocketbase:8090"
       PB_EMAIL: ${PB_ADMIN_EMAIL}
       PB_PASS: ${PB_ADMIN_PASSWORD}
-    volumes:
-      - ./scripts/cast-prom-metrics.py:/app/cast-prom-metrics.py:ro
     depends_on:
       - mistserver
       - pocketbase
