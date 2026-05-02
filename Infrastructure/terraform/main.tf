@@ -1,38 +1,19 @@
 # ---------------------------------------------------------------------------
 # Castology IP Broadcast Platform — Terraform
 #
-# Manages cloud/network infrastructure only. Service provisioning is handled
-# by Docker Compose (Infrastructure/docker/).
+# Manages cloud resources only. Service provisioning is handled by Docker
+# Compose (Infrastructure/docker/). Firewall is applied by deploy.sh.
 #
 # Resources managed here:
 #   - Cloudflare DNS
 #   - Cloudflare R2 bucket
 #   - Cloudflare Worker + KV namespace
-#   - VPS firewall (ufw)
 #
 # Apply individual modules:
 #   terraform apply -target=module.dns
-#   terraform apply -target=module.firewall
 #   terraform apply -target=module.r2
 #   terraform apply -target=module.worker
 # ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# Firewall
-# ---------------------------------------------------------------------------
-module "firewall" {
-  source = "./modules/firewall"
-
-  vps_ip               = var.vps_ip
-  ssh_private_key_path = var.ssh_private_key_path
-  allow_tcp            = [22]
-  allow_udp            = concat([var.srt_ingest_port], var.srt_output_ports)
-  allow_tcp_from = {
-    "4242" = ["127.0.0.1/32"]  # MistServer API — loopback only
-    "9101" = ["127.0.0.1/32"]  # Prometheus exporter — loopback only
-    "3000" = ["127.0.0.1/32"]  # Grafana — loopback only
-  }
-}
 
 # ---------------------------------------------------------------------------
 # Cloudflare DNS
