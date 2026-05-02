@@ -1,0 +1,181 @@
+# ---------------------------------------------------------------------------
+# Castology IP Broadcast Platform — Docker Compose
+#
+# Services:
+#   mistserver   — SRT ingest + HLS origin (ddvtech/mistserver)
+#   pocketbase   — Auth + operator data store
+#   cast-exporter — Prometheus exporter (cast-prom-metrics.py)
+#   prometheus   — Metrics scraping
+#   grafana      — Dashboards
+#   nginx        — Reverse proxy (play.castology.tv, stream.castology.tv)
+#
+# Usage:
+#   cp .env.example .env && editor .env
+#   docker compose up -d
+#
+# SSH tunnels for admin UIs (not exposed publicly):
+#   ssh -L 4242:localhost:4242 -L 8090:localhost:8090 -L 3000:localhost:3000 root@<vps-ip>
+# ---------------------------------------------------------------------------
+
+services:
+
+  # -------------------------------------------------------------------------
+  # MistServer — SRT ingest + HLS origin
+  # -------------------------------------------------------------------------
+  mistserver:
+    build:
+      context: .
+      dockerfile: mistserver.Dockerfile
+    image: castology-mistserver
+    container_name: mistserver
+    restart: unless-stopped
+    shm_size: 1536m
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+      nproc:
+        soft: 8192
+        hard: 8192
+    environment:
+      PROMETHEUS_PASSPHRASE: ${PROMETHEUS_PASSPHRASE}
+      SRT_INGEST_PORT: ${SRT_INGEST_PORT:-1235}
+      PB_URL: "http://pocketbase:8090"
+      PB_EMAIL: ${PB_ADMIN_EMAIL}
+      PB_PASS: ${PB_ADMIN_PASSWORD}
+    volumes:
+      - ./config/mistserver/mistserver.conf:/etc/mistserver.conf:rw
+      - ./scripts/cast-mist-stream-auth.sh:/usr/local/bin/cast-mist-stream-auth.sh:ro
+      - ./scripts/cast-r2-writer:/usr/local/bin/cast-r2-writer:ro
+      - mistserver-data:/var/lib/mistserver
+    ports:
+      - "4242:4242"          # API (loopback — accessed via SSH tunnel)
+      - "8080:8080"          # HTTP / HLS origin
+      - "${SRT_INGEST_PORT:-1235}:${SRT_INGEST_PORT:-1235}/udp"
+      - "${SRT_OUTPUT_PORT:-1234}:${SRT_OUTPUT_PORT:-1234}/udp"
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:4242/${PROMETHEUS_PASSPHRASE}"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  # -------------------------------------------------------------------------
+  # PocketBase — auth store + operator data
+  # -------------------------------------------------------------------------
+  pocketbase:
+    image: ghcr.io/muchobien/pocketbase:latest
+    container_name: pocketbase
+    restart: unless-stopped
+    command: ["--http=0.0.0.0:8090"]
+    volumes:
+      - pocketbase-data:/pb_data
+    ports:
+      - "8090:8090"          # API + admin UI (loopback — SSH tunnel only)
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8090/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  # -------------------------------------------------------------------------
+  # cast-exporter — custom Prometheus exporter (session status, broadcaster feeds)
+  # -------------------------------------------------------------------------
+  cast-exporter:
+    image: python:3.12-slim
+    container_name: cast-exporter
+    restart: unless-stopped
+    working_dir: /app
+    command: ["sh", "-c", "pip install --quiet prometheus_client && exec python3 cast-prom-metrics.py"]
+    environment:
+      STREAMS_JSON: ${STREAMS_JSON}
+      EXPORTER_PORT: ${EXPORTER_PORT:-9101}
+      MIST_API_HOST: "mistserver"
+      MIST_API_PORT: "4242"
+      PB_URL: "http://pocketbase:8090"
+      PB_EMAIL: ${PB_ADMIN_EMAIL}
+      PB_PASS: ${PB_ADMIN_PASSWORD}
+    volumes:
+      - ./scripts/cast-prom-metrics.py:/app/cast-prom-metrics.py:ro
+    depends_on:
+      - mistserver
+      - pocketbase
+    networks:
+      - internal
+
+  # -------------------------------------------------------------------------
+  # Prometheus
+  # -------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: prometheus
+    restart: unless-stopped
+    # envsubst renders PROMETHEUS_PASSPHRASE into the config before startup
+    entrypoint: ["/bin/sh", "/etc/prometheus/entrypoint.sh"]
+    environment:
+      PROMETHEUS_PASSPHRASE: ${PROMETHEUS_PASSPHRASE}
+    volumes:
+      - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml.tpl:ro
+      - ./prometheus-entrypoint.sh:/etc/prometheus/entrypoint.sh:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"          # loopback only
+    depends_on:
+      - mistserver
+      - cast-exporter
+    networks:
+      - internal
+
+  # -------------------------------------------------------------------------
+  # Grafana
+  # -------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:11.2.2
+    container_name: grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_HTTP_PORT: "3000"
+    volumes:
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"          # loopback only
+    depends_on:
+      - prometheus
+    networks:
+      - internal
+
+  # -------------------------------------------------------------------------
+  # nginx — play.castology.tv + stream.castology.tv
+  # -------------------------------------------------------------------------
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: nginx
+    restart: unless-stopped
+    volumes:
+      - ./config/nginx/play.castology.tv.conf:/etc/nginx/conf.d/play.conf:ro
+      - ./config/nginx/stream.castology.tv.conf:/etc/nginx/conf.d/stream.conf:ro
+      - ./config/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "${NGINX_PORT:-8888}:80"
+    depends_on:
+      - mistserver
+    networks:
+      - internal
+
+volumes:
+  mistserver-data:
+  pocketbase-data:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  internal:
+    driver: bridge

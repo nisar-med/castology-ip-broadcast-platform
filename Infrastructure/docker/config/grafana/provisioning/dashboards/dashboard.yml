@@ -1,0 +1,11 @@
+apiVersion: 1
+providers:
+  - name: Castology Dashboards
+    orgId: 1
+    folder: Castology
+    folderUid: castology
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards

@@ -1,0 +1,20 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "mistserver"
+    scrape_interval: 10s
+    scrape_timeout: 10s
+    metrics_path: "/${PROMETHEUS_PASSPHRASE}"
+    static_configs:
+      - targets: ["mistserver:4242"]
+        labels:
+          instance: "mist-streaming"
+
+  - job_name: "cast-prom-metrics"
+    scrape_interval: 10s
+    static_configs:
+      - targets: ["cast-exporter:9101"]
+        labels:
+          instance: "mist-streaming"

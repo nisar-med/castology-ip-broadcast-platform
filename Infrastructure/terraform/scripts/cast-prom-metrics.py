@@ -28,16 +28,10 @@ log = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-_raw_streams = os.environ.get("STREAMS_JSON", "")
-STREAMS = json.loads(_raw_streams) if _raw_streams else [
-    {"name": "geo+ent"},
-    {"name": "geo+news"},
-]
-STREAM_NAMES = [s["name"] for s in STREAMS]
-
 METRICS_PORT      = int(os.environ.get("EXPORTER_PORT", "9101"))
 MIST_API_PORT     = os.environ.get("MIST_API_PORT", "4242")
-MIST_API_URL      = f"http://127.0.0.1:{MIST_API_PORT}/api"
+MIST_API_HOST     = os.environ.get("MIST_API_HOST", "127.0.0.1")
+MIST_API_URL      = f"http://{MIST_API_HOST}:{MIST_API_PORT}/api"
 PB_URL            = os.environ.get("PB_URL", "http://127.0.0.1:8090")
 PB_EMAIL          = os.environ.get("PB_EMAIL", "admin@castology.tv")
 PB_PASS           = os.environ.get("PB_PASS", "")
@@ -193,16 +187,22 @@ r2_upload_errors = Counter(
     registry=registry,
 )
 
-# Initialise labels so metrics appear even before first poll
-for _s in STREAM_NAMES:
-    stream_up.labels(stream=_s).set(0)
-    r2_ffmpeg_up.labels(stream=_s).set(0)
-    r2_segment_lag.labels(stream=_s).set(0)
-    r2_segment_age.labels(stream=_s).set(0)
-    r2_upload_errors.labels(stream=_s)
-    for _d in ("input", "output", "unknown"):
-        for _c in ("TSSRT", "HLS", "HTTP", "unknown"):
-            operator_sessions.labels(stream=_s, direction=_d, connector=_c).set(0)
+_init_streams: set[str] = set()
+
+def _ensure_stream_labels(stream_names: list[str]):
+    """Initialise gauge label sets for any stream not yet seen."""
+    for _s in stream_names:
+        if _s in _init_streams:
+            continue
+        _init_streams.add(_s)
+        stream_up.labels(stream=_s).set(0)
+        r2_ffmpeg_up.labels(stream=_s).set(0)
+        r2_segment_lag.labels(stream=_s).set(0)
+        r2_segment_age.labels(stream=_s).set(0)
+        r2_upload_errors.labels(stream=_s)
+        for _d in ("input", "output", "unknown"):
+            for _c in ("TSSRT", "HLS", "HTTP", "unknown"):
+                operator_sessions.labels(stream=_s, direction=_d, connector=_c).set(0)
 
 # Per-session previous poll state for delta-based rate metrics
 _prev_poll: dict[tuple, dict] = {}  # (stream, ip, direction, connector) → {bytes, retrans, sent, ts}
@@ -221,6 +221,7 @@ _pb_config = {
     "broadcaster_feeds": [], # [{"broadcaster_name", "stream", "feed_role", "allowed_ips"}]
     "affiliate_clients": [], # [{"affiliate_name", "stream", "client_name", "endpoint_role", "allowed_ips"}]
     "tokens": set(),         # all valid token_keys
+    "stream_names": [],      # unique stream names derived from active broadcaster_feeds
 }
 
 def _pb_auth() -> str:
@@ -319,18 +320,28 @@ def poll_pb_config():
                 if b["token_key"]:
                     tokens.add(b["token_key"])
 
+            stream_names = sorted({f["stream"] for f in parsed_broadcaster_feeds})
+
             with _pb_lock:
                 _pb_config["broadcasters"] = parsed_broadcasters
                 _pb_config["broadcaster_feeds"] = parsed_broadcaster_feeds
                 _pb_config["affiliate_clients"] = parsed_affiliate_clients
                 _pb_config["tokens"] = tokens
+                _pb_config["stream_names"] = stream_names
 
-            log.info("PocketBase config refreshed: %d broadcasters, %d broadcaster feeds, %d affiliate clients, %d tokens",
-                     len(parsed_broadcasters), len(parsed_broadcaster_feeds), len(parsed_affiliate_clients), len(tokens))
+            _ensure_stream_labels(stream_names)
+
+            log.info("PocketBase config refreshed: %d broadcasters, %d broadcaster feeds, %d affiliate clients, %d tokens, streams=%s",
+                     len(parsed_broadcasters), len(parsed_broadcaster_feeds), len(parsed_affiliate_clients), len(tokens), stream_names)
         except Exception as e:
             log.warning("PocketBase config poll error: %s", e)
 
         time.sleep(HEALTH_POLL_SECS)
+
+
+def _stream_names() -> list[str]:
+    with _pb_lock:
+        return list(_pb_config["stream_names"])
 
 
 # ── MistServer API helpers ────────────────────────────────────────────────────
@@ -427,12 +438,12 @@ def _assign_connected_ips(entities, connected_ips: set[str]):
     return assignments
 
 
-def _build_broadcaster_feeds(broadcasters: list[dict], broadcaster_feeds: list[dict]) -> dict[str, list[dict]]:
+def _build_broadcaster_feeds(broadcasters: list[dict], broadcaster_feeds: list[dict], stream_names: list[str]) -> dict[str, list[dict]]:
     feeds_by_key: dict[tuple[str, str], list[dict]] = {}
     for feed in broadcaster_feeds:
         feeds_by_key.setdefault((feed["broadcaster_name"], feed["stream"]), []).append(feed)
 
-    stream_feeds: dict[str, list[dict]] = {stream: [] for stream in STREAM_NAMES}
+    stream_feeds: dict[str, list[dict]] = {stream: [] for stream in stream_names}
     for broadcaster in broadcasters:
         for stream in broadcaster["streams"]:
             feed_defs = feeds_by_key.get((broadcaster["name"], stream))
@@ -454,8 +465,8 @@ def _build_broadcaster_feeds(broadcasters: list[dict], broadcaster_feeds: list[d
     return stream_feeds
 
 
-def _build_affiliate_clients(affiliate_clients: list[dict]) -> dict[str, list[dict]]:
-    stream_clients: dict[str, list[dict]] = {stream: [] for stream in STREAM_NAMES}
+def _build_affiliate_clients(affiliate_clients: list[dict], stream_names: list[str]) -> dict[str, list[dict]]:
+    stream_clients: dict[str, list[dict]] = {stream: [] for stream in stream_names}
     for client in affiliate_clients:
         if client.get("is_test_client"):
             continue
@@ -647,7 +658,13 @@ def _check_health():
                 log.warning("UNREGISTERED SESSION: stream=%s ip=%s direction=%s connector=%s",
                             stream, ip, direction, connector)
 
-    for name in STREAM_NAMES:
+    with _pb_lock:
+        broadcasters = list(_pb_config["broadcasters"])
+        broadcaster_feeds = list(_pb_config["broadcaster_feeds"])
+        affiliate_clients = list(_pb_config["affiliate_clients"])
+        stream_names = list(_pb_config["stream_names"])
+
+    for name in stream_names:
         stream_up.labels(stream=name).set(1 if name in active_inputs else 0)
         for d in ("input", "output", "unknown"):
             for c in ("TSSRT", "HLS", "HTTP", "unknown"):
@@ -655,20 +672,15 @@ def _check_health():
                     counts.get((name, d, c), 0)
                 )
 
-    with _pb_lock:
-        broadcasters = list(_pb_config["broadcasters"])
-        broadcaster_feeds = list(_pb_config["broadcaster_feeds"])
-        affiliate_clients = list(_pb_config["affiliate_clients"])
-
     # Do NOT .clear() health gauges — that causes Grafana to show stale values when
     # the ip= label changes (old series lingers until Prometheus staleness window).
     # Instead we zero out the previous label set explicitly when the IP changes.
 
-    broadcaster_feed_defs = _build_broadcaster_feeds(broadcasters, broadcaster_feeds)
+    broadcaster_feed_defs = _build_broadcaster_feeds(broadcasters, broadcaster_feeds, stream_names)
     broadcaster_summary: dict[tuple[str, str], dict] = {}
 
     # Check each broadcaster feed
-    for stream in STREAM_NAMES:
+    for stream in stream_names:
         stream_broadcasters = broadcaster_feed_defs.get(stream, [])
         for b, ip in _assign_connected_ips(stream_broadcasters, active_inputs.get(stream, set())):
             summary_key = (b["name"], stream)
@@ -726,11 +738,11 @@ def _check_health():
             ingest_jitter.labels(name=broadcaster["name"], stream=stream, ip=new_ip).set(summary["jitter"])
             ingest_loss.labels(name=broadcaster["name"], stream=stream, ip=new_ip).set(summary["loss"])
 
-    affiliate_client_defs = _build_affiliate_clients(affiliate_clients)
+    affiliate_client_defs = _build_affiliate_clients(affiliate_clients, stream_names)
     affiliate_summary: dict[tuple[str, str], dict] = {}
 
     # Check each affiliate client
-    for stream in STREAM_NAMES:
+    for stream in stream_names:
         monitored_outputs = active_outputs.get(stream, set())
         stream_groups = affiliate_client_defs.get(stream, [])
         for g, ip in _assign_connected_ips(stream_groups, monitored_outputs):
@@ -811,8 +823,7 @@ def poll_r2_pipeline():
     _prev_error_counts: dict[str, int] = {}
 
     while True:
-        for s in STREAMS:
-            name = s["name"]
+        for name in _stream_names():
             safe = name.replace("+", "-").replace(" ", "-")
             hls_dir = os.path.join(HLS_BASE_DIR, name)
             label = {"stream": name}

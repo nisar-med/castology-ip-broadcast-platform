@@ -1,10 +1,6 @@
-output "vps_ips" {
-  description = "IP of each VPS entry"
-  value       = { for k, v in var.vps : k => v.ip }
-}
-
-output "onboard_url" {
-  value = module.dns.onboard_url
+output "vps_ip" {
+  description = "IP of the VPS running all services"
+  value       = var.vps_ip
 }
 
 output "play_url" {
@@ -24,6 +20,6 @@ output "r2_bucket" {
 }
 
 output "operator_tokens_kv_namespace_id" {
-  description = "KV namespace ID for operator tokens — needed for PocketBase onboarding integration"
+  description = "KV namespace ID for operator tokens"
   value       = module.worker.kv_namespace_id
 }
