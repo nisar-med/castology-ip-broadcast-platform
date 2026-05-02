@@ -66,12 +66,32 @@ scp "${SCRIPT_DIR}/.env" root@"${VPS_IP}":"${DOCKER_DIR}/.env"
 echo "    .env copied"
 
 # ---------------------------------------------------------------------------
-echo "==> [4/6] Running host setup (kernel tuning, Docker daemon limits)"
+echo "==> [4/7] Running host setup (kernel tuning, Docker daemon limits)"
 # ---------------------------------------------------------------------------
 ssh_run bash "${DOCKER_DIR}/setup-host.sh"
 
 # ---------------------------------------------------------------------------
-echo "==> [5/6] Building and starting stack"
+echo "==> [5/7] Configuring firewall (ufw)"
+# ---------------------------------------------------------------------------
+# Read SRT ports from local .env if available
+if [ -f "${SCRIPT_DIR}/.env" ]; then
+  SRT_INGEST=$(grep -E '^SRT_INGEST_PORT=' "${SCRIPT_DIR}/.env" | cut -d= -f2 | tr -d '[:space:]')
+  SRT_OUTPUT=$(grep -E '^SRT_OUTPUT_PORT=' "${SCRIPT_DIR}/.env" | cut -d= -f2 | tr -d '[:space:]')
+fi
+SRT_INGEST="${SRT_INGEST:-1235}"
+SRT_OUTPUT="${SRT_OUTPUT:-1234}"
+ssh_run bash -s -- "${DOCKER_DIR}/scripts/firewall.sh" "${SRT_INGEST}" "${SRT_OUTPUT}" << 'REMOTE'
+set -euo pipefail
+SCRIPT="$1"
+SRT_INGEST="$2"
+SRT_OUTPUT="$3"
+ALLOW_TCP=22 \
+ALLOW_UDP="${SRT_INGEST},${SRT_OUTPUT}" \
+bash "${SCRIPT}"
+REMOTE
+
+# ---------------------------------------------------------------------------
+echo "==> [6/7] Building and starting stack"
 # ---------------------------------------------------------------------------
 ssh_run bash -s -- "${DOCKER_DIR}" << 'REMOTE'
 set -euo pipefail
@@ -81,7 +101,7 @@ docker compose up -d
 REMOTE
 
 # ---------------------------------------------------------------------------
-echo "==> [6/6] Health check"
+echo "==> [7/7] Health check"
 # ---------------------------------------------------------------------------
 sleep 15
 ssh_run bash -s -- "${VPS_IP}" << 'REMOTE'
