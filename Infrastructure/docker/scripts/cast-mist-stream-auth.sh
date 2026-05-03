@@ -11,7 +11,6 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
 
 
 LOG_TAG = "cast-mist-stream-auth"
@@ -41,12 +40,11 @@ PB_PASS = os.environ.get("PB_PASS", PB_PASS)
 VPS_ID = os.environ.get("VPS_ID", VPS_ID)
 
 
-def log(message: str) -> None:
-    print(f"{utc_now()} {LOG_TAG}: {message}", file=sys.stderr, flush=True)
-
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+def log(message: str, level: str = "INFO") -> None:
+    # MistServer LOG_MSG format: level|progname|pid|file:line|stream|message
+    line = f"{level}|{LOG_TAG}|{os.getpid()}|auth:0||{message}\n"
+    sys.stderr.write(line)
+    sys.stderr.flush()
 
 
 def output_stream(value: str) -> int:
@@ -175,7 +173,7 @@ def main() -> int:
             return output_stream(sname)
         token = (query.get("token") or [""])[0]
         if not token:
-            log(f"DENY: no token in HLS request '{request_url}'")
+            log(f"DENY: no token in HLS request '{request_url}'", "WARN")
             return 1
     else:
         sname, sep, token = stream.partition("/")
@@ -195,18 +193,18 @@ def main() -> int:
                     log(f"ALLOW: broadcaster ingest stream={sname} broadcaster={matched_feed.get('broadcaster_name','')} ip={client_ip}")
                     return output_stream(sname)
             except Exception as exc:  # noqa: BLE001
-                log(f"ERROR: broadcaster ingest check failed for stream={sname} ip={client_ip}: {exc}")
-            log(f"DENY: no token in SRT stream '{stream}' from ip={client_ip} (expected format: streamname/token)")
+                log(f"ERROR: broadcaster ingest check failed for stream={sname} ip={client_ip}: {exc}", "FAIL")
+            log(f"DENY: no token in SRT stream '{stream}' from ip={client_ip} (expected format: streamname/token)", "WARN")
             return 1
 
     try:
         pb_token = pb_auth()
     except Exception as exc:  # noqa: BLE001
-        log(f"ERROR: PocketBase auth failed: {exc}")
+        log(f"ERROR: PocketBase auth failed: {exc}", "FAIL")
         return 1
 
     if not pb_token:
-        log("ERROR: PocketBase auth failed")
+        log("ERROR: PocketBase auth failed", "FAIL")
         return 1
 
     affiliate_records = pb_fetch_records(
@@ -216,7 +214,7 @@ def main() -> int:
         per_page=1,
     )
     if not affiliate_records:
-        log(f"DENY: no active affiliate for token={token}")
+        log(f"DENY: no active affiliate for token={token}", "WARN")
         return 1
 
     affiliate = affiliate_records[0]
@@ -235,7 +233,8 @@ def main() -> int:
         log(
             "DENY: no active affiliate_client match "
             f"for ip={client_ip} affiliate='{affiliate_name}' stream='{sname}' "
-            "(check allowed_ips and active flag)"
+            "(check allowed_ips and active flag)",
+            "WARN",
         )
         return 1
 
@@ -247,7 +246,8 @@ def main() -> int:
         log(
             "DENY: duplicate session "
             f"stream={sname} affiliate={affiliate_name} client={client_name} "
-            f"ip={client_ip} connector={connector} existing={session_count}"
+            f"ip={client_ip} connector={connector} existing={session_count}",
+            "WARN",
         )
         return 1
 
