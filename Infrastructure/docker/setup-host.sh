@@ -78,13 +78,13 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
-# /dev/shm — resize to 1536 MB for MistServer shared memory
+# /dev/shm — resize to 11092 MB for MistServer shared memory (~95% of 11.7GB RAM)
 # ---------------------------------------------------------------------------
 if ! grep -q 'tmpfs /dev/shm' /etc/fstab; then
-  echo "tmpfs /dev/shm tmpfs defaults,size=1536M 0 0" >> /etc/fstab
+  echo "tmpfs /dev/shm tmpfs defaults,size=11092M 0 0" >> /etc/fstab
   echo "==> /etc/fstab updated"
 fi
-mount -o remount,size=1536M /dev/shm 2>/dev/null && echo "==> /dev/shm remounted at 1536M" || true
+mount -o remount,size=11092M /dev/shm 2>/dev/null && echo "==> /dev/shm remounted at 11092M" || true
 
 echo "==> Host setup complete — reboot recommended for all limits to take full effect"
 echo "    Then: docker compose up -d"
