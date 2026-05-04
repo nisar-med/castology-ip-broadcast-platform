@@ -17,8 +17,8 @@ cat > /etc/sysctl.d/99-cast-srt.conf << 'EOF'
 # UDP / SRT socket buffers
 net.core.rmem_max        = 16777216
 net.core.wmem_max        = 16777216
-net.core.rmem_default    = 2097152
-net.core.wmem_default    = 2097152
+net.core.rmem_default    = 4194304
+net.core.wmem_default    = 4194304
 net.ipv4.udp_mem         = 524288 786432 6291456
 
 # NIC packet backlog — default 1000 is too low for 750 simultaneous streams

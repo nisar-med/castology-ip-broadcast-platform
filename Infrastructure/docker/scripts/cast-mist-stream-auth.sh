@@ -40,9 +40,12 @@ PB_PASS = os.environ.get("PB_PASS", PB_PASS)
 VPS_ID = os.environ.get("VPS_ID", VPS_ID)
 
 
+_client_ip: str = "-"
+
+
 def log(message: str, level: str = "INFO") -> None:
     # MistServer LOG_MSG format: level|progname|pid|file:line|stream|message
-    line = f"{level}|{LOG_TAG}|{os.getpid()}|auth:0||{message}\n"
+    line = f"{level}|{LOG_TAG}|{os.getpid()}|auth:0||[{_client_ip}] {message}\n"
     sys.stderr.write(line)
     sys.stderr.flush()
 
@@ -155,10 +158,12 @@ def parse_trigger_input() -> tuple[str, str, str, str]:
 
 
 def main() -> int:
+    global _client_ip
     stream, client_ip, connector, request_url = parse_trigger_input()
 
     stream = stream.replace(" ", "+")
     client_ip = normalize_client_ip(client_ip)
+    _client_ip = client_ip
 
     if connector not in {"TSSRT", "HLS"}:
         return output_stream(stream)

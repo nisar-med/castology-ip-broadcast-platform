@@ -33,3 +33,6 @@ ssh root@51.254.136.32 "cd /opt/castology/Infrastructure/docker && docker compos
 - HLS play: `https://play.castology.tv/live/{stream}/index.m3u8`
 - SRT output: `srt://stream.castology.tv:1234`
 - Admin UIs via SSH tunnel: `ssh -L 4242:localhost:4242 -L 8090:localhost:8090 -L 3000:localhost:3000 root@51.254.136.32`
+
+# API Authentication
+- Api auth requires double MD5 hash not single e.g. MD5(MD5(password) + challenge)

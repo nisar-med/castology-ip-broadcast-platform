@@ -53,7 +53,7 @@ services:
       - ./config/mistserver/mistserver.conf:/etc/mistserver.conf:rw
       - mistserver-data:/var/lib/mistserver
     ports:
-      - "4242:4242"          # API (loopback — accessed via SSH tunnel)
+      - "127.0.0.1:4242:4242"  # API (loopback — accessed via SSH tunnel)
       - "8080:8080"          # HTTP / HLS origin
       - "${SRT_INGEST_PORT:-1235}:${SRT_INGEST_PORT:-1235}/udp"
       - "${SRT_OUTPUT_PORT:-1234}:${SRT_OUTPUT_PORT:-1234}/udp"
@@ -76,7 +76,7 @@ services:
     volumes:
       - pocketbase-data:/pb_data
     ports:
-      - "8090:8090"          # API + admin UI (loopback — SSH tunnel only)
+      - "127.0.0.1:8090:8090"  # API + admin UI (loopback — SSH tunnel only)
     networks:
       - internal
     healthcheck:
@@ -127,7 +127,7 @@ services:
       - ./prometheus-entrypoint.sh:/etc/prometheus/entrypoint.sh:ro
       - prometheus-data:/prometheus
     ports:
-      - "9090:9090"          # loopback only
+      - "127.0.0.1:9090:9090"  # loopback only
     depends_on:
       - mistserver
       - cast-exporter
@@ -188,7 +188,7 @@ services:
       - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     ports:
-      - "3000:3000"          # loopback only
+      - "127.0.0.1:3000:3000"  # loopback only
     depends_on:
       - prometheus
       - loki
