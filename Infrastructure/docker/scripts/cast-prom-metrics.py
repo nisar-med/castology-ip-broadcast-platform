@@ -108,17 +108,10 @@ connection_status = Gauge(
 
 # Pre-joined table metrics — all share {name, stream, ip} so Grafana merge works cleanly
 ingest_status   = Gauge("mist_ingest_status",    "Ingest connection: 1=online 0=offline", ["name", "stream", "ip"], registry=registry)
-ingest_jitter   = Gauge("mist_ingest_jitter_ms", "Ingest stream jitter in ms",            ["name", "stream", "ip"], registry=registry)
 ingest_loss     = Gauge("mist_ingest_loss",      "Ingest packet loss ratio",              ["name", "stream", "ip"], registry=registry)
 broadcaster_feed_status = Gauge(
     "mist_broadcaster_feed_status",
     "Broadcaster feed connection: 1=online 0=offline",
-    ["name", "stream", "feed_role", "ip"],
-    registry=registry,
-)
-broadcaster_feed_jitter = Gauge(
-    "mist_broadcaster_feed_jitter_ms",
-    "Broadcaster feed stream jitter in ms",
     ["name", "stream", "feed_role", "ip"],
     registry=registry,
 )
@@ -712,7 +705,6 @@ def _check_health():
             candidate = {
                 "ip": ip or "none",
                 "status": 1 if ip is not None else 0,
-                "jitter": 0,
                 "loss": input_loss.get((stream, ip), 0) if ip is not None else 0,
                 "feed_role": b["feed_role"],
             }
@@ -730,12 +722,10 @@ def _check_health():
             feed_key = (b["name"], stream, b["feed_role"])
             old_ip = _last_feed_ip.get(feed_key)
             if old_ip and old_ip != new_ip:
-                broadcaster_feed_status.labels(name=b["name"], stream=stream, feed_role=b["feed_role"], ip=old_ip).set(0)
-                broadcaster_feed_jitter.labels(name=b["name"], stream=stream, feed_role=b["feed_role"], ip=old_ip).set(0)
-                broadcaster_feed_loss.labels(name=b["name"], stream=stream, feed_role=b["feed_role"], ip=old_ip).set(0)
+                broadcaster_feed_status.remove(b["name"], stream, b["feed_role"], old_ip)
+                broadcaster_feed_loss.remove(b["name"], stream, b["feed_role"], old_ip)
             _last_feed_ip[feed_key] = new_ip
             broadcaster_feed_status.labels(name=b["name"], stream=stream, feed_role=b["feed_role"], ip=new_ip).set(1 if ip is not None else 0)
-            broadcaster_feed_jitter.labels(name=b["name"], stream=stream, feed_role=b["feed_role"], ip=new_ip).set(0)
             broadcaster_feed_loss.labels(name=b["name"], stream=stream, feed_role=b["feed_role"], ip=new_ip).set(input_loss.get((stream, ip), 0) if ip is not None else 0)
             if ip is None:
                 log.warning("BROADCASTER FEED OFFLINE: broadcaster=%s stream=%s feed_role=%s", b["name"], stream, b["feed_role"])
@@ -745,21 +735,18 @@ def _check_health():
             summary = broadcaster_summary.get((broadcaster["name"], stream), {
                 "ip": "none",
                 "status": 0,
-                "jitter": 0,
                 "loss": 0,
             })
             new_ip = summary["ip"]
             ingest_key = (broadcaster["name"], stream)
             old_ip = _last_ingest_ip.get(ingest_key)
             if old_ip and old_ip != new_ip:
-                connection_status.labels(name=broadcaster["name"], stream=stream, role="broadcaster", ip=old_ip).set(0)
-                ingest_status.labels(name=broadcaster["name"], stream=stream, ip=old_ip).set(0)
-                ingest_jitter.labels(name=broadcaster["name"], stream=stream, ip=old_ip).set(0)
-                ingest_loss.labels(name=broadcaster["name"], stream=stream, ip=old_ip).set(0)
+                connection_status.remove(broadcaster["name"], stream, "broadcaster", old_ip)
+                ingest_status.remove(broadcaster["name"], stream, old_ip)
+                ingest_loss.remove(broadcaster["name"], stream, old_ip)
             _last_ingest_ip[ingest_key] = new_ip
             connection_status.labels(name=broadcaster["name"], stream=stream, role="broadcaster", ip=new_ip).set(summary["status"])
             ingest_status.labels(name=broadcaster["name"], stream=stream, ip=new_ip).set(summary["status"])
-            ingest_jitter.labels(name=broadcaster["name"], stream=stream, ip=new_ip).set(summary["jitter"])
             ingest_loss.labels(name=broadcaster["name"], stream=stream, ip=new_ip).set(summary["loss"])
 
     affiliate_client_defs = _build_affiliate_clients(affiliate_clients, stream_names)

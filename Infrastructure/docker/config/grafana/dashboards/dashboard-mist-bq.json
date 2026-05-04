@@ -92,18 +92,6 @@
           },
           {
             "matcher": {
-              "id": "byName",
-              "options": "Jitter (ms)"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "ms"
-              }
-            ]
-          },
-          {
-            "matcher": {
               "id": "byRegexp",
               "options": ".* 1$"
             },
@@ -196,22 +184,11 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "mist_broadcaster_feed_jitter_ms{job=\"cast-prom-metrics\", stream=~\"$stream\"}",
-          "format": "table",
-          "instant": true,
-          "legendFormat": "",
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
           "expr": "mist_broadcaster_feed_loss{job=\"cast-prom-metrics\", stream=~\"$stream\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "",
-          "refId": "C"
+          "refId": "B"
         }
       ],
       "title": "Broadcaster Feeds (Primary / Backup)",
@@ -233,30 +210,27 @@
           "options": {
             "includeByName": {
               "Value #A": true,
-              "Value #B": true,
-              "Value #C": true,
               "feed_role": true,
               "ip": true,
               "name": true,
-              "stream": true
+              "stream": true,
+              "Value #B": true
             },
             "indexByName": {
               "Value #A": 4,
-              "Value #B": 5,
-              "Value #C": 6,
               "feed_role": 2,
               "ip": 3,
               "name": 0,
-              "stream": 1
+              "stream": 1,
+              "Value #B": 5
             },
             "renameByName": {
               "Value #A": "Status",
-              "Value #B": "Jitter (ms)",
-              "Value #C": "Loss",
               "feed_role": "Feed Role",
               "ip": "IP",
               "name": "Name",
-              "stream": "Stream"
+              "stream": "Stream",
+              "Value #B": "Loss"
             }
           }
         }
