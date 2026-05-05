@@ -42,12 +42,20 @@ VPS_ID = os.environ.get("VPS_ID", VPS_ID)
 
 _client_ip: str = "-"
 
+_MIST_LOG_FIFO = "/tmp/mist/MstLog"
+
 
 def log(message: str, level: str = "INFO") -> None:
-    # MistServer LOG_MSG format: level|progname|pid|file:line|stream|message
+    # MistServer sets trigger stderr to /dev/null (procs.cpp), so write
+    # directly to the MstLog FIFO which MistController reads and emits to stdout.
+    # LOG_MSG format: level|progname|pid|file:line|stream|message
     line = f"{level}|{LOG_TAG}|{os.getpid()}|auth:0||[{_client_ip}] {message}\n"
-    sys.stderr.write(line)
-    sys.stderr.flush()
+    try:
+        fd = os.open(_MIST_LOG_FIFO, os.O_WRONLY | os.O_NONBLOCK)
+        os.write(fd, line.encode())
+        os.close(fd)
+    except OSError:
+        pass
 
 
 def output_stream(value: str) -> int:
