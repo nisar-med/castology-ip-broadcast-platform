@@ -117,6 +117,33 @@
           {
             "matcher": {
               "id": "byName",
+              "options": "Jitter (ms)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {"color": "green", "value": 0},
+                    {"color": "yellow", "value": 100},
+                    {"color": "red", "value": 200}
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
               "options": "Name"
             },
             "properties": [
@@ -189,6 +216,17 @@
           "instant": true,
           "legendFormat": "",
           "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "mist_stream_jitter_ms{job=\"cast-prom-metrics\", stream=~\"$stream\"}",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "C"
         }
       ],
       "title": "Broadcaster Feeds (Primary / Backup)",
@@ -214,7 +252,8 @@
               "ip": true,
               "name": true,
               "stream": true,
-              "Value #B": true
+              "Value #B": true,
+              "Value #C": true
             },
             "indexByName": {
               "Value #A": 4,
@@ -222,7 +261,8 @@
               "ip": 3,
               "name": 0,
               "stream": 1,
-              "Value #B": 5
+              "Value #B": 5,
+              "Value #C": 6
             },
             "renameByName": {
               "Value #A": "Status",
@@ -230,7 +270,8 @@
               "ip": "IP",
               "name": "Name",
               "stream": "Stream",
-              "Value #B": "Loss"
+              "Value #B": "Loss",
+              "Value #C": "Jitter (ms)"
             }
           }
         }

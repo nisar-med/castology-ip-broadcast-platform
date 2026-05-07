@@ -32,6 +32,7 @@ METRICS_PORT      = int(os.environ.get("EXPORTER_PORT", "9101"))
 MIST_API_PORT     = os.environ.get("MIST_API_PORT", "4242")
 MIST_API_HOST     = os.environ.get("MIST_API_HOST", "127.0.0.1")
 MIST_API_URL      = f"http://{MIST_API_HOST}:{MIST_API_PORT}/api"
+MIST_HTTP_PORT    = os.environ.get("MIST_HTTP_PORT", "8080")
 MIST_USERNAME     = os.environ.get("MIST_USERNAME", "admin")
 MIST_PASSWORD     = os.environ.get("MIST_PASSWORD", "")
 PB_URL            = os.environ.get("PB_URL", "http://127.0.0.1:8090")
@@ -41,6 +42,7 @@ PB_PASS           = os.environ.get("PB_PASS", "")
 SESSION_POLL_SECS = 10
 HEALTH_POLL_SECS  = 60
 R2_POLL_SECS      = 5
+JITTER_POLL_SECS  = 5
 HLS_BASE_DIR      = "/var/lib/mist-hls"
 CLIENTS_LOOKBACK_SECS = int(os.environ.get("CLIENTS_LOOKBACK_SECS", "3"))
 
@@ -94,6 +96,18 @@ stream_up = Gauge(
     "mist_stream_up",
     "1 if stream is online in MistServer",
     ["stream"],
+    registry=registry,
+)
+stream_jitter_ms = Gauge(
+    "mist_stream_jitter_ms",
+    "Stream-level ingest jitter in milliseconds (from /json_{stream}.js meta.jitter)",
+    ["stream"],
+    registry=registry,
+)
+track_jitter_ms = Gauge(
+    "mist_track_jitter_ms",
+    "Per-track ingest jitter in milliseconds (from /json_{stream}.js per-track jitter)",
+    ["stream", "track_type", "codec"],
     registry=registry,
 )
 
@@ -379,9 +393,16 @@ def _allowed_ips(raw: str) -> list[str]:
     return [x.strip() for x in raw.split(",") if x.strip()]
 
 
+_INTERNAL_NETWORKS = [
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),  # Docker bridge ranges
+    ipaddress.ip_network("10.0.0.0/8"),
+]
+
 def _is_loopback_ip(ip: str) -> bool:
     try:
-        return ipaddress.ip_address(ip).is_loopback
+        addr = ipaddress.ip_address(ip)
+        return any(addr in net for net in _INTERNAL_NETWORKS)
     except ValueError:
         return False
 
@@ -615,6 +636,8 @@ def _check_health():
 
         stream    = row[fi["stream"]]
         protocol  = row[fi["protocol"]]
+        if not protocol:
+            continue
         direction, connector = _parse_protocol(protocol)
         ip = row[fi["host"]]
         ip = ip.replace("::ffff:", "").strip("[]").split(":")[0] if "::ffff:" in ip or ip.startswith("[") else ip
@@ -821,6 +844,36 @@ def _check_health():
             playout_uptime.labels(name=affiliate_name, stream=stream, ip=new_ip).set(summary["uptime"])
 
 
+# ── Jitter poller ────────────────────────────────────────────────────────────
+
+def poll_stream_jitter():
+    while True:
+        for stream in _stream_names():
+            url = f"http://{MIST_API_HOST}:{MIST_HTTP_PORT}/json_{stream}.js"
+            try:
+                req = urllib.request.Request(url, headers={"Connection": "close"})
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    data = json.loads(resp.read())
+
+                meta = data.get("meta", {})
+                jitter = meta.get("jitter")
+                if jitter is not None:
+                    stream_jitter_ms.labels(stream=stream).set(jitter)
+
+                for track_key, track in meta.get("tracks", {}).items():
+                    track_jitter = track.get("jitter")
+                    if track_jitter is None:
+                        continue
+                    track_type = track.get("type", "unknown")
+                    codec = track.get("codec", "unknown")
+                    track_jitter_ms.labels(stream=stream, track_type=track_type, codec=codec).set(track_jitter)
+
+            except Exception as e:
+                log.debug("[jitter-poll] %s: %s", stream, e)
+
+        time.sleep(JITTER_POLL_SECS)
+
+
 # ── R2 pipeline poller ───────────────────────────────────────────────────────
 
 def _seg_number(filename: str) -> int:
@@ -917,6 +970,9 @@ if __name__ == "__main__":
 
     threading.Thread(target=poll_sessions_and_streams, daemon=True, name="mist-api-poller").start()
     log.info("Started MistServer API poller (interval %ds)", SESSION_POLL_SECS)
+
+    threading.Thread(target=poll_stream_jitter, daemon=True, name="jitter-poller").start()
+    log.info("Started jitter poller (interval %ds)", JITTER_POLL_SECS)
 
     threading.Thread(target=poll_r2_pipeline, daemon=True, name="r2-pipeline-poller").start()
     log.info("Started R2 pipeline poller (interval %ds)", R2_POLL_SECS)

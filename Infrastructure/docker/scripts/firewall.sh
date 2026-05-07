@@ -43,6 +43,20 @@ for cidr in $CF_IPS_V4 $CF_IPS_V6; do
   ufw allow proto tcp from "$cidr" to any port 80 comment "HTTP Cloudflare"
 done
 
+# Docker bypasses UFW — enforce Cloudflare-only on port 80 (nginx) via DOCKER-USER chain.
+# DOCKER-USER rules persist across 'docker compose up' but are flushed on reboot,
+# so we re-apply them here every time this script runs.
+echo "==> Restricting Docker port 80 to Cloudflare IPs via DOCKER-USER"
+# Flush existing DOCKER-USER rules targeting port 80 to avoid duplicates
+iptables -D DOCKER-USER -p tcp --dport 80 -j RETURN 2>/dev/null || true
+iptables -D DOCKER-USER -p tcp --dport 80 -j DROP 2>/dev/null || true
+# Allow Cloudflare IPv4
+for cidr in $CF_IPS_V4; do
+  iptables -I DOCKER-USER -p tcp -s "$cidr" --dport 80 -j RETURN
+done
+# Drop everything else on port 80
+iptables -A DOCKER-USER -p tcp --dport 80 -j DROP
+
 # UDP open to all
 if [ -n "$ALLOW_UDP" ]; then
   IFS=',' read -ra PORTS <<< "$ALLOW_UDP"
