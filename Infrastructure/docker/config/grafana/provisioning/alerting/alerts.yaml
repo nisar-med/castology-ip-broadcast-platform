@@ -11,10 +11,10 @@ groups:
         title: Broadcaster Feed Offline
         condition: C
         for: 30s
-        noDataState: Alerting
+        noDataState: OK
         annotations:
           summary: "Broadcaster {{ $labels.name }} ({{ $labels.feed_role }}) offline on {{ $labels.stream }}"
-          description: "Feed has been offline for more than 30s. Last IP: {{ $labels.ip }}"
+          description: "Feed {{ $labels.name }} / {{ $labels.feed_role }} on stream {{ $labels.stream }} has been offline for more than 30s. Last IP: {{ $labels.ip }}"
         labels:
           severity: critical
         data:
