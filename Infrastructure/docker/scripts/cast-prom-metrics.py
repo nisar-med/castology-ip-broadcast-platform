@@ -127,7 +127,7 @@ broadcaster_feed_loss = Gauge(
 affiliate_client_status = Gauge(
     "mist_affiliate_client_status",
     "Affiliate client connection: 1=online 0=offline",
-    ["name", "stream", "client_name", "endpoint_role", "ip"],
+    ["name", "stream", "client_name", "endpoint_role", "ip", "monitor"],
     registry=registry,
 )
 affiliate_client_loss = Gauge(
@@ -323,6 +323,7 @@ def poll_pb_config():
                     "endpoint_role": (client.get("endpoint_role") or "primary").strip().lower() or "primary",
                     "allowed_ips": client.get("allowed_ips", ""),
                     "is_test_client": bool(client.get("is_test_client", False)),
+                    "monitor": bool(client.get("monitor", False)),
                     "notes": client.get("notes", ""),
                 })
 
@@ -508,6 +509,7 @@ def _build_affiliate_clients(affiliate_clients: list[dict], stream_names: list[s
             "client_name": client["client_name"],
             "endpoint_role": client["endpoint_role"],
             "allowed_ips": client["allowed_ips"],
+            "monitor": client["monitor"],
         })
     return stream_clients
 
@@ -763,13 +765,14 @@ def _check_health():
             new_ip = ip if ip is not None else "none"
             client_key = (g["name"], stream, g["client_name"], g["endpoint_role"])
             old_ip = _last_client_ip.get(client_key)
+            monitor = "1" if g["monitor"] else "0"
             if old_ip and old_ip != new_ip:
-                affiliate_client_status.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip=old_ip).set(0)
+                affiliate_client_status.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip=old_ip, monitor=monitor).set(0)
                 affiliate_client_loss.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip=old_ip).set(0)
                 affiliate_client_bytes.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip=old_ip).set(0)
                 affiliate_client_uptime.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip=old_ip).set(0)
             _last_client_ip[client_key] = new_ip
-            affiliate_client_status.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip=new_ip).set(1 if ip is not None else 0)
+            affiliate_client_status.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip=new_ip, monitor=monitor).set(1 if ip is not None else 0)
             affiliate_client_loss.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip=new_ip).set(output_loss.get((stream, ip), 0) if ip is not None else 0)
             affiliate_client_bytes.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip=new_ip).set(output_bytes.get((stream, ip), 0) if ip is not None else 0)
             affiliate_client_uptime.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip=new_ip).set(output_uptime.get((stream, ip), 0) if ip is not None else 0)
