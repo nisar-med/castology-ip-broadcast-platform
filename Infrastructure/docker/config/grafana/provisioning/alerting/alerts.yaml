@@ -1,0 +1,182 @@
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: Castology Broadcast Alerts
+    folder: Castology
+    interval: 1m
+    rules:
+
+      # ── 1. Broadcaster feed offline ─────────────────────────────────────────
+      - uid: alert-broadcaster-offline
+        title: Broadcaster Feed Offline
+        condition: C
+        for: 30s
+        annotations:
+          summary: "Broadcaster {{ $labels.name }} ({{ $labels.feed_role }}) offline on {{ $labels.stream }}"
+          description: "Feed has been offline for more than 30s. Last IP: {{ $labels.ip }}"
+        labels:
+          severity: critical
+        data:
+          - refId: A
+            datasourceUid: "PBFA97CFB590B2093"
+            relativeTimeRange:
+              from: 60
+              to: 0
+            model:
+              expr: mist_broadcaster_feed_status{job="cast-prom-metrics"}
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 60
+              to: 0
+            model:
+              type: threshold
+              conditions:
+                - evaluator:
+                    type: lt
+                    params: [1]
+                  query:
+                    params: [A]
+
+      # ── 2. High packet loss on output ────────────────────────────────────────
+      - uid: alert-output-packet-loss
+        title: High Output Packet Loss
+        condition: C
+        for: 1m
+        annotations:
+          summary: "High packet loss for {{ $labels.affiliate }} / {{ $labels.client_name }} on {{ $labels.stream }}"
+          description: "Loss ratio {{ $values.A.Value | printf \"%.1f\" }}% (threshold 2%)"
+        labels:
+          severity: warning
+        data:
+          - refId: A
+            datasourceUid: "PBFA97CFB590B2093"
+            relativeTimeRange:
+              from: 60
+              to: 0
+            model:
+              expr: mist_session_packet_loss_ratio{job="cast-prom-metrics", direction="output"} * 100
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 60
+              to: 0
+            model:
+              type: threshold
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [2]
+                  query:
+                    params: [A]
+
+      # ── 3. Auth deny spike ───────────────────────────────────────────────────
+      - uid: alert-auth-deny-spike
+        title: Auth Deny Spike
+        condition: C
+        for: 0m
+        annotations:
+          summary: "Auth denies for {{ $labels.affiliate }} on {{ $labels.stream }}"
+          description: "{{ $values.A.Value | printf \"%.0f\" }} deny events in the last 5 minutes — check token or IP"
+        labels:
+          severity: warning
+        data:
+          - refId: A
+            datasourceUid: "PBFA97CFB590B2093"
+            relativeTimeRange:
+              from: 300
+              to: 0
+            model:
+              expr: increase(mist_auth_events_total{job="cast-prom-metrics", result="deny"}[5m])
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 300
+              to: 0
+            model:
+              type: threshold
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [3]
+                  query:
+                    params: [A]
+
+      # ── 4. Affiliate status change (offline > 2m) ────────────────────────────
+      - uid: alert-affiliate-offline
+        title: Affiliate Client Offline
+        condition: C
+        for: 2m
+        annotations:
+          summary: "{{ $labels.name }} / {{ $labels.client_name }} offline on {{ $labels.stream }}"
+          description: "Affiliate has been offline for more than 2 minutes. Last IP: {{ $labels.ip }}"
+        labels:
+          severity: warning
+        data:
+          - refId: A
+            datasourceUid: "PBFA97CFB590B2093"
+            relativeTimeRange:
+              from: 60
+              to: 0
+            model:
+              expr: mist_affiliate_client_status{job="cast-prom-metrics"}
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 60
+              to: 0
+            model:
+              type: threshold
+              conditions:
+                - evaluator:
+                    type: lt
+                    params: [1]
+                  query:
+                    params: [A]
+
+      # ── 5. High ingest jitter ────────────────────────────────────────────────
+      - uid: alert-high-jitter
+        title: High Ingest Jitter
+        condition: C
+        for: 2m
+        annotations:
+          summary: "High jitter on {{ $labels.stream }}"
+          description: "Jitter {{ $values.A.Value | printf \"%.0f\" }}ms exceeds 200ms threshold — upstream feed may be unstable"
+        labels:
+          severity: warning
+        data:
+          - refId: A
+            datasourceUid: "PBFA97CFB590B2093"
+            relativeTimeRange:
+              from: 60
+              to: 0
+            model:
+              expr: mist_stream_jitter_ms{job="cast-prom-metrics"}
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 60
+              to: 0
+            model:
+              type: threshold
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [200]
+                  query:
+                    params: [A]
