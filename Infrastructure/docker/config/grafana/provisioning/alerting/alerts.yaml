@@ -11,6 +11,7 @@ groups:
         title: Broadcaster Feed Offline
         condition: C
         for: 30s
+        noDataState: Alerting
         annotations:
           summary: "Broadcaster {{ $labels.name }} ({{ $labels.feed_role }}) offline on {{ $labels.stream }}"
           description: "Feed has been offline for more than 30s. Last IP: {{ $labels.ip }}"
@@ -23,6 +24,7 @@ groups:
               from: 60
               to: 0
             model:
+              refId: A
               expr: mist_broadcaster_feed_status{job="cast-prom-metrics"}
               instant: true
               intervalMs: 1000
@@ -33,6 +35,7 @@ groups:
               from: 60
               to: 0
             model:
+              refId: C
               type: threshold
               conditions:
                 - evaluator:
@@ -46,6 +49,7 @@ groups:
         title: High Output Packet Loss
         condition: C
         for: 1m
+        noDataState: OK
         annotations:
           summary: "High packet loss for {{ $labels.affiliate }} / {{ $labels.client_name }} on {{ $labels.stream }}"
           description: "Loss ratio {{ $values.A.Value | printf \"%.1f\" }}% (threshold 2%)"
@@ -58,6 +62,7 @@ groups:
               from: 60
               to: 0
             model:
+              refId: A
               expr: mist_session_packet_loss_ratio{job="cast-prom-metrics", direction="output"} * 100
               instant: true
               intervalMs: 1000
@@ -68,6 +73,7 @@ groups:
               from: 60
               to: 0
             model:
+              refId: C
               type: threshold
               conditions:
                 - evaluator:
@@ -81,9 +87,10 @@ groups:
         title: Auth Deny Spike
         condition: C
         for: 0m
+        noDataState: OK
         annotations:
-          summary: "Auth denies for {{ $labels.affiliate }} on {{ $labels.stream }}"
-          description: "{{ $values.A.Value | printf \"%.0f\" }} deny events in the last 5 minutes — check token or IP"
+          summary: "Auth denies for {{ $labels.affiliate | default \"unknown\" }} on {{ $labels.stream | default \"unknown\" }}"
+          description: "{{ if $values.A }}{{ $values.A.Value | printf \"%.0f\" }}{{ else }}Multiple{{ end }} deny events in the last 5 minutes — check token or IP"
         labels:
           severity: warning
         data:
@@ -93,6 +100,7 @@ groups:
               from: 300
               to: 0
             model:
+              refId: A
               expr: increase(mist_auth_events_total{job="cast-prom-metrics", result="deny"}[5m])
               instant: true
               intervalMs: 1000
@@ -103,6 +111,7 @@ groups:
               from: 300
               to: 0
             model:
+              refId: C
               type: threshold
               conditions:
                 - evaluator:
@@ -111,11 +120,12 @@ groups:
                   query:
                     params: [A]
 
-      # ── 4. Affiliate status change (offline > 2m) ────────────────────────────
+      # ── 4. Affiliate client offline ──────────────────────────────────────────
       - uid: alert-affiliate-offline
         title: Affiliate Client Offline
         condition: C
         for: 2m
+        noDataState: OK
         annotations:
           summary: "{{ $labels.name }} / {{ $labels.client_name }} offline on {{ $labels.stream }}"
           description: "Affiliate has been offline for more than 2 minutes. Last IP: {{ $labels.ip }}"
@@ -128,6 +138,7 @@ groups:
               from: 60
               to: 0
             model:
+              refId: A
               expr: mist_affiliate_client_status{job="cast-prom-metrics"}
               instant: true
               intervalMs: 1000
@@ -138,6 +149,7 @@ groups:
               from: 60
               to: 0
             model:
+              refId: C
               type: threshold
               conditions:
                 - evaluator:
@@ -151,6 +163,7 @@ groups:
         title: High Ingest Jitter
         condition: C
         for: 2m
+        noDataState: OK
         annotations:
           summary: "High jitter on {{ $labels.stream }}"
           description: "Jitter {{ $values.A.Value | printf \"%.0f\" }}ms exceeds 200ms threshold — upstream feed may be unstable"
@@ -163,6 +176,7 @@ groups:
               from: 60
               to: 0
             model:
+              refId: A
               expr: mist_stream_jitter_ms{job="cast-prom-metrics"}
               instant: true
               intervalMs: 1000
@@ -173,6 +187,7 @@ groups:
               from: 60
               to: 0
             model:
+              refId: C
               type: threshold
               conditions:
                 - evaluator:
