@@ -11,6 +11,7 @@ Exposes metrics on port 9101 for Prometheus to scrape.
 import json
 import ipaddress
 import os
+import re
 import subprocess
 import threading
 import time
@@ -32,7 +33,6 @@ METRICS_PORT      = int(os.environ.get("EXPORTER_PORT", "9101"))
 MIST_API_PORT     = os.environ.get("MIST_API_PORT", "4242")
 MIST_API_HOST     = os.environ.get("MIST_API_HOST", "127.0.0.1")
 MIST_API_URL      = f"http://{MIST_API_HOST}:{MIST_API_PORT}/api"
-MIST_HTTP_PORT    = os.environ.get("MIST_HTTP_PORT", "8080")
 MIST_USERNAME     = os.environ.get("MIST_USERNAME", "admin")
 MIST_PASSWORD     = os.environ.get("MIST_PASSWORD", "")
 PB_URL            = os.environ.get("PB_URL", "http://127.0.0.1:8090")
@@ -42,7 +42,6 @@ PB_PASS           = os.environ.get("PB_PASS", "")
 SESSION_POLL_SECS = 10
 HEALTH_POLL_SECS  = 60
 R2_POLL_SECS      = 5
-JITTER_POLL_SECS  = 5
 HLS_BASE_DIR      = "/var/lib/mist-hls"
 CLIENTS_LOOKBACK_SECS = int(os.environ.get("CLIENTS_LOOKBACK_SECS", "3"))
 
@@ -113,16 +112,6 @@ track_jitter_ms = Gauge(
 
 # Health checks against PocketBase config
 # One series per configured entity×stream. ip=connected IP or "none" when offline.
-connection_status = Gauge(
-    "mist_connection_status",
-    "1 if connected, 0 if offline. name=broadcaster or group, role=broadcaster|operator, ip=connected IP or none",
-    ["name", "stream", "role", "ip"],
-    registry=registry,
-)
-
-# Pre-joined table metrics — all share {name, stream, ip} so Grafana merge works cleanly
-ingest_status   = Gauge("mist_ingest_status",    "Ingest connection: 1=online 0=offline", ["name", "stream", "ip"], registry=registry)
-ingest_loss     = Gauge("mist_ingest_loss",      "Ingest packet loss ratio",              ["name", "stream", "ip"], registry=registry)
 broadcaster_feed_status = Gauge(
     "mist_broadcaster_feed_status",
     "Broadcaster feed connection: 1=online 0=offline",
@@ -159,14 +148,25 @@ affiliate_client_uptime = Gauge(
     ["name", "stream", "client_name", "endpoint_role", "ip"],
     registry=registry,
 )
-playout_status  = Gauge("mist_playout_status",   "Playout connection: 1=online 0=offline",["name", "stream", "ip"], registry=registry)
-playout_loss    = Gauge("mist_playout_loss",     "Playout packet loss ratio",             ["name", "stream", "ip"], registry=registry)
-playout_bytes   = Gauge("mist_playout_bytes",    "Playout bytes transferred",             ["name", "stream", "ip"], registry=registry)
-playout_uptime  = Gauge("mist_playout_uptime_seconds", "Playout session uptime seconds",  ["name", "stream", "ip"], registry=registry)
 session_unregistered = Gauge(
     "mist_session_unregistered",
     "1 if an active session has no matching token in PocketBase",
     ["stream", "ip", "direction", "connector"],
+    registry=registry,
+)
+
+# Auth events from cast-mist-stream-auth trigger (ALLOW/DENY per affiliate)
+mist_auth_events = Counter(
+    "mist_auth_events_total",
+    "Cumulative auth events from cast-mist-stream-auth by stream, affiliate and result",
+    ["stream", "affiliate", "result"],
+    registry=registry,
+)
+# Output process warnings from MistOutTSSRT (packet loss etc.) per stream
+mist_output_warnings = Counter(
+    "mist_output_warnings_total",
+    "Cumulative WARN/FAIL log events from MistOutTSSRT by stream",
+    ["stream"],
     registry=registry,
 )
 
@@ -217,10 +217,11 @@ def _ensure_stream_labels(stream_names: list[str]):
 _prev_poll: dict[tuple, dict] = {}  # (stream, ip, direction, connector) → {bytes, retrans, sent, ts}
 
 # Last written IP labels for health gauges — used to zero out stale series when IP changes
-_last_ingest_ip:   dict[tuple[str, str], str] = {}  # (name, stream) → ip
-_last_playout_ip:  dict[tuple[str, str], str] = {}  # (name, stream) → ip
 _last_feed_ip:     dict[tuple[str, str, str], str] = {}  # (name, stream, feed_role) → ip
 _last_client_ip:   dict[tuple[str, str, str, str], str] = {}  # (name, stream, client_name, endpoint_role) → ip
+
+# Highest log entry timestamp seen — prevents double-counting on each poll
+_last_log_ts: int = 0
 
 # ── PocketBase config cache (refreshed every HEALTH_POLL_SECS) ───────────────
 
@@ -606,7 +607,7 @@ def _resolve_session_identity(ip: str, stream: str, direction: str) -> tuple[str
 
 def _check_health():
     """Cross-reference live sessions against PocketBase config."""
-    data = mist_post({"clients": {"time": -CLIENTS_LOOKBACK_SECS}})
+    data = mist_post({"clients": {"time": -CLIENTS_LOOKBACK_SECS}, "active_streams": {}, "log": True})
     clients_block = data.get("clients", {})
     fields = clients_block.get("fields", [])
     rows   = clients_block.get("data", [])
@@ -753,53 +754,12 @@ def _check_health():
             if ip is None:
                 log.warning("BROADCASTER FEED OFFLINE: broadcaster=%s stream=%s feed_role=%s", b["name"], stream, b["feed_role"])
 
-    for broadcaster in broadcasters:
-        for stream in broadcaster["streams"]:
-            summary = broadcaster_summary.get((broadcaster["name"], stream), {
-                "ip": "none",
-                "status": 0,
-                "loss": 0,
-            })
-            new_ip = summary["ip"]
-            ingest_key = (broadcaster["name"], stream)
-            old_ip = _last_ingest_ip.get(ingest_key)
-            if old_ip and old_ip != new_ip:
-                connection_status.remove(broadcaster["name"], stream, "broadcaster", old_ip)
-                ingest_status.remove(broadcaster["name"], stream, old_ip)
-                ingest_loss.remove(broadcaster["name"], stream, old_ip)
-            _last_ingest_ip[ingest_key] = new_ip
-            connection_status.labels(name=broadcaster["name"], stream=stream, role="broadcaster", ip=new_ip).set(summary["status"])
-            ingest_status.labels(name=broadcaster["name"], stream=stream, ip=new_ip).set(summary["status"])
-            ingest_loss.labels(name=broadcaster["name"], stream=stream, ip=new_ip).set(summary["loss"])
-
     affiliate_client_defs = _build_affiliate_clients(affiliate_clients, stream_names)
-    affiliate_summary: dict[tuple[str, str], dict] = {}
 
-    # Check each affiliate client
     for stream in stream_names:
         monitored_outputs = active_outputs.get(stream, set())
         stream_groups = affiliate_client_defs.get(stream, [])
         for g, ip in _assign_connected_ips(stream_groups, monitored_outputs):
-            summary_key = (g["name"], stream)
-            existing = affiliate_summary.get(summary_key)
-            candidate = {
-                "ip": ip or "none",
-                "status": 1 if ip is not None else 0,
-                "loss": output_loss.get((stream, ip), 0) if ip is not None else 0,
-                "bytes": output_bytes.get((stream, ip), 0) if ip is not None else 0,
-                "uptime": output_uptime.get((stream, ip), 0) if ip is not None else 0,
-                "endpoint_role": g["endpoint_role"],
-            }
-            if existing is None:
-                affiliate_summary[summary_key] = candidate
-            elif existing["status"] == 0 and candidate["status"] == 1:
-                affiliate_summary[summary_key] = candidate
-            elif existing["status"] == candidate["status"] == 1:
-                existing_primary = existing["endpoint_role"] == "primary"
-                candidate_primary = candidate["endpoint_role"] == "primary"
-                if candidate_primary and not existing_primary:
-                    affiliate_summary[summary_key] = candidate
-
             new_ip = ip if ip is not None else "none"
             client_key = (g["name"], stream, g["client_name"], g["endpoint_role"])
             old_ip = _last_client_ip.get(client_key)
@@ -814,64 +774,66 @@ def _check_health():
             affiliate_client_bytes.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip=new_ip).set(output_bytes.get((stream, ip), 0) if ip is not None else 0)
             affiliate_client_uptime.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip=new_ip).set(output_uptime.get((stream, ip), 0) if ip is not None else 0)
 
-    configured_affiliate_pairs = sorted({
-        (group["name"], stream)
-        for stream, clients in affiliate_client_defs.items()
-        for group in clients
-    })
-    for affiliate_name, stream in configured_affiliate_pairs:
-            summary = affiliate_summary.get((affiliate_name, stream), {
-                "ip": "none",
-                "status": 0,
-                "loss": 0,
-                "bytes": 0,
-                "uptime": 0,
-            })
-            new_ip = summary["ip"]
-            playout_key = (affiliate_name, stream)
-            old_ip = _last_playout_ip.get(playout_key)
-            if old_ip and old_ip != new_ip:
-                connection_status.labels(name=affiliate_name, stream=stream, role="operator", ip=old_ip).set(0)
-                playout_status.labels(name=affiliate_name, stream=stream, ip=old_ip).set(0)
-                playout_loss.labels(name=affiliate_name, stream=stream, ip=old_ip).set(0)
-                playout_bytes.labels(name=affiliate_name, stream=stream, ip=old_ip).set(0)
-                playout_uptime.labels(name=affiliate_name, stream=stream, ip=old_ip).set(0)
-            _last_playout_ip[playout_key] = new_ip
-            connection_status.labels(name=affiliate_name, stream=stream, role="operator", ip=new_ip).set(summary["status"])
-            playout_status.labels(name=affiliate_name, stream=stream, ip=new_ip).set(summary["status"])
-            playout_loss.labels(name=affiliate_name, stream=stream, ip=new_ip).set(summary["loss"])
-            playout_bytes.labels(name=affiliate_name, stream=stream, ip=new_ip).set(summary["bytes"])
-            playout_uptime.labels(name=affiliate_name, stream=stream, ip=new_ip).set(summary["uptime"])
+    # Parse jitter from active_streams response
+    active_streams_block = data.get("active_streams", {})
+    streams_data = active_streams_block.get("data", {})
+    fields = active_streams_block.get("fields", [])
+    health_idx = fields.index("health") if "health" in fields else None
+    if health_idx is not None:
+        for stream, row in streams_data.items():
+            if not isinstance(row, list) or len(row) <= health_idx:
+                continue
+            health = row[health_idx]
+            if not isinstance(health, dict):
+                continue
+            jitter = health.get("jitter")
+            if jitter is not None:
+                stream_jitter_ms.labels(stream=stream).set(jitter)
+            for key, val in health.items():
+                if not isinstance(val, dict):
+                    continue
+                track_jitter = val.get("jitter")
+                if track_jitter is None:
+                    continue
+                track_jitter_ms.labels(
+                    stream=stream,
+                    track_type=val.get("type", val.get("codec", "unknown")),
+                    codec=val.get("codec", "unknown"),
+                ).set(track_jitter)
 
+    # Parse log entries for auth events and output warnings
+    global _last_log_ts
+    _RE_AUTH_STREAM    = re.compile(r"stream=(\S+)")
+    _RE_AUTH_AFFILIATE = re.compile(r"affiliate[=']([^'\s]+(?:\s+[^'\s]+)*?)(?:\s+client=|\s*$)")
+    new_max_ts = _last_log_ts
+    for entry in data.get("log") or []:
+        if not isinstance(entry, list) or len(entry) < 6:
+            continue
+        ts, level, msg, _stream, _pid, binary = entry[0], entry[1], entry[2], entry[3], entry[4], entry[5]
+        if ts <= _last_log_ts:
+            continue
+        if ts > new_max_ts:
+            new_max_ts = ts
 
-# ── Jitter poller ────────────────────────────────────────────────────────────
+        if binary == "cast-mist-stream-auth" and level in ("INFO", "WARN", "FAIL"):
+            m_stream = _RE_AUTH_STREAM.search(msg)
+            stream_label = m_stream.group(1) if m_stream else "unknown"
+            if "ALLOW:" in msg:
+                m_aff = _RE_AUTH_AFFILIATE.search(msg)
+                affiliate_label = m_aff.group(1).strip() if m_aff else "unknown"
+                mist_auth_events.labels(stream=stream_label, affiliate=affiliate_label, result="allow").inc()
+            elif "DENY:" in msg:
+                m_aff = _RE_AUTH_AFFILIATE.search(msg)
+                affiliate_label = m_aff.group(1).strip() if m_aff else "unknown"
+                mist_auth_events.labels(stream=stream_label, affiliate=affiliate_label, result="deny").inc()
+            elif "ERROR:" in msg:
+                mist_auth_events.labels(stream=stream_label, affiliate="unknown", result="error").inc()
 
-def poll_stream_jitter():
-    while True:
-        for stream in _stream_names():
-            url = f"http://{MIST_API_HOST}:{MIST_HTTP_PORT}/json_{stream}.js"
-            try:
-                req = urllib.request.Request(url, headers={"Connection": "close"})
-                with urllib.request.urlopen(req, timeout=5) as resp:
-                    data = json.loads(resp.read())
+        elif binary == "MistOutTSSRT" and level in ("WARN", "FAIL", "CRIT"):
+            stream_label = _stream or "unknown"
+            mist_output_warnings.labels(stream=stream_label).inc()
 
-                meta = data.get("meta", {})
-                jitter = meta.get("jitter")
-                if jitter is not None:
-                    stream_jitter_ms.labels(stream=stream).set(jitter)
-
-                for track_key, track in meta.get("tracks", {}).items():
-                    track_jitter = track.get("jitter")
-                    if track_jitter is None:
-                        continue
-                    track_type = track.get("type", "unknown")
-                    codec = track.get("codec", "unknown")
-                    track_jitter_ms.labels(stream=stream, track_type=track_type, codec=codec).set(track_jitter)
-
-            except Exception as e:
-                log.debug("[jitter-poll] %s: %s", stream, e)
-
-        time.sleep(JITTER_POLL_SECS)
+    _last_log_ts = new_max_ts
 
 
 # ── R2 pipeline poller ───────────────────────────────────────────────────────
@@ -970,9 +932,6 @@ if __name__ == "__main__":
 
     threading.Thread(target=poll_sessions_and_streams, daemon=True, name="mist-api-poller").start()
     log.info("Started MistServer API poller (interval %ds)", SESSION_POLL_SECS)
-
-    threading.Thread(target=poll_stream_jitter, daemon=True, name="jitter-poller").start()
-    log.info("Started jitter poller (interval %ds)", JITTER_POLL_SECS)
 
     threading.Thread(target=poll_r2_pipeline, daemon=True, name="r2-pipeline-poller").start()
     log.info("Started R2 pipeline poller (interval %ds)", R2_POLL_SECS)

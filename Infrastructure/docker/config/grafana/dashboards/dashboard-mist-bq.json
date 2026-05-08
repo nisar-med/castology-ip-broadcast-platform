@@ -725,7 +725,7 @@
         "multi": true,
         "name": "stream",
         "query": {
-          "query": "label_values(mist_ingest_status{job=\"cast-prom-metrics\"}, stream)",
+          "query": "label_values(mist_broadcaster_feed_status{job=\"cast-prom-metrics\"}, stream)",
           "refId": "A"
         },
         "refresh": 2,
@@ -735,6 +735,6 @@
     ]
   },
   "timezone": "browser",
-  "title": "MistServer Session Status",
+  "title": "Session Summary",
   "uid": "mist-bq"
 }
