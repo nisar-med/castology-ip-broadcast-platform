@@ -37,6 +37,7 @@ groups:
             model:
               refId: C
               type: threshold
+              expression: A
               conditions:
                 - evaluator:
                     type: lt
@@ -75,6 +76,7 @@ groups:
             model:
               refId: C
               type: threshold
+              expression: A
               conditions:
                 - evaluator:
                     type: gt
@@ -89,7 +91,7 @@ groups:
         for: 0m
         noDataState: OK
         annotations:
-          summary: "Auth denies for {{ $labels.affiliate | default \"unknown\" }} on {{ $labels.stream | default \"unknown\" }}"
+          summary: "Auth denies for {{ $labels.affiliate }} on {{ $labels.stream }}"
           description: "{{ if $values.A }}{{ $values.A.Value | printf \"%.0f\" }}{{ else }}Multiple{{ end }} deny events in the last 5 minutes — check token or IP"
         labels:
           severity: warning
@@ -113,6 +115,7 @@ groups:
             model:
               refId: C
               type: threshold
+              expression: A
               conditions:
                 - evaluator:
                     type: gt
@@ -151,6 +154,7 @@ groups:
             model:
               refId: C
               type: threshold
+              expression: A
               conditions:
                 - evaluator:
                     type: lt
@@ -189,6 +193,7 @@ groups:
             model:
               refId: C
               type: threshold
+              expression: A
               conditions:
                 - evaluator:
                     type: gt
