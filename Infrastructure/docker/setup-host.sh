@@ -4,6 +4,70 @@
 # Idempotent — safe to re-run.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${SCRIPT_DIR}/.env"
+
+read_env_var() {
+  local key="$1"
+  if [ ! -f "${ENV_FILE}" ]; then
+    return 0
+  fi
+  grep -E "^${key}=" "${ENV_FILE}" | cut -d= -f2- | tr -d '[:space:]' || true
+}
+
+configure_tailscale() {
+  local enabled auth_key hostname ssh_enabled advertise_tags distro
+
+  enabled="$(read_env_var TAILSCALE_ENABLED)"
+  enabled="${enabled,,}"
+  if [ "${enabled}" != "true" ]; then
+    return 0
+  fi
+
+  auth_key="$(read_env_var TAILSCALE_AUTH_KEY)"
+  hostname="$(read_env_var TAILSCALE_HOSTNAME)"
+  ssh_enabled="$(read_env_var TAILSCALE_SSH)"
+  advertise_tags="$(read_env_var TAILSCALE_ADVERTISE_TAGS)"
+
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+  apt-get install -y -qq ca-certificates curl
+
+  distro="$(. /etc/os-release && echo "${VERSION_CODENAME}")"
+  install -m 0755 -d /usr/share/keyrings
+  curl -fsSL "https://pkgs.tailscale.com/stable/ubuntu/${distro}.noarmor.gpg" \
+    -o /usr/share/keyrings/tailscale-archive-keyring.gpg
+  curl -fsSL "https://pkgs.tailscale.com/stable/ubuntu/${distro}.tailscale-keyring.list" \
+    -o /etc/apt/sources.list.d/tailscale.list
+
+  apt-get update -qq
+  apt-get install -y -qq tailscale
+  systemctl enable --now tailscaled
+
+  up_args=()
+  if [ -n "${hostname}" ]; then
+    up_args+=("--hostname=${hostname}")
+  fi
+  if [ "${ssh_enabled,,}" = "true" ]; then
+    up_args+=("--ssh")
+  fi
+  if [ -n "${advertise_tags}" ]; then
+    up_args+=("--advertise-tags=${advertise_tags}")
+  fi
+
+  if tailscale ip -4 >/dev/null 2>&1; then
+    tailscale up "${up_args[@]}"
+  else
+    if [ -z "${auth_key}" ]; then
+      echo "ERROR: TAILSCALE_ENABLED=true but TAILSCALE_AUTH_KEY is empty and the node is not enrolled yet." >&2
+      exit 1
+    fi
+    tailscale up --auth-key="${auth_key}" "${up_args[@]}"
+  fi
+
+  echo "==> Tailscale ready: $(tailscale ip -4 | head -n1)"
+}
+
 # ---------------------------------------------------------------------------
 # Kernel / sysctl tuning
 #
@@ -85,6 +149,8 @@ if ! grep -q 'tmpfs /dev/shm' /etc/fstab; then
   echo "==> /etc/fstab updated"
 fi
 mount -o remount,size=11092M /dev/shm 2>/dev/null && echo "==> /dev/shm remounted at 11092M" || true
+
+configure_tailscale
 
 echo "==> Host setup complete — reboot recommended for all limits to take full effect"
 echo "    Then: docker compose up -d"

@@ -1,8 +1,8 @@
 # ---------------------------------------------------------------------------
 # Castology IP Broadcast Platform — Terraform
 #
-# Manages cloud resources only. Service provisioning is handled by Docker
-# Compose (Infrastructure/docker/). Firewall is applied by deploy.sh.
+# Manages cloud resources only. Service provisioning, firewall policy, and
+# optional Tailscale admin access are handled by Infrastructure/docker/.
 #
 # Resources managed here:
 #   - Cloudflare DNS

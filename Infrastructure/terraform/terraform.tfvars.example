@@ -18,6 +18,8 @@ r2_bucket_name = "castology-hls"
 # ---------------------------------------------------------------------------
 # VPS
 # ---------------------------------------------------------------------------
+# Public IP used for DNS/app traffic. Admin SSH can move to Tailscale via
+# Infrastructure/docker/.env without changing Terraform.
 vps_ip = "1.2.3.4"
 
 # ---------------------------------------------------------------------------

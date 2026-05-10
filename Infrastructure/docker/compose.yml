@@ -14,7 +14,7 @@
 #   docker compose up -d
 #
 # SSH tunnels for admin UIs (not exposed publicly):
-#   ssh -L 4242:localhost:4242 -L 8090:localhost:8090 -L 3000:localhost:3000 root@<vps-ip>
+#   ssh -L 4242:localhost:4242 -L 8090:localhost:8090 -L 3000:localhost:3000 root@<tailscale-host-or-vps-ip>
 # ---------------------------------------------------------------------------
 
 services:

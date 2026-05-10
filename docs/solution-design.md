@@ -58,6 +58,8 @@ Encoder (OBS/vMix)                      Affiliate STB/IRD/Player
 
 Both roles currently share one VPS. The Terraform `vps` map supports different IPs; split is straightforward if load grows.
 
+In the current repo layout, Cloudflare resources are managed by the live Terraform root, while VPS bootstrap, firewall rules, and optional Tailscale admin access are managed by `Infrastructure/docker/`. Admin services stay bound to localhost and are reached with SSH tunnels over either the public SSH path or the Tailscale tailnet.
+
 ### 2.2 Cloudflare Services
 
 | Service | Purpose |
@@ -292,7 +294,7 @@ R2-backed HLS delivery for `/live/` paths is gated through a Cloudflare Worker.
 | `mistserver:4242/prometheus?pass={passphrase}` | MistServer internal metrics |
 | `node-exporter:9100` | VPS system metrics (CPU, RAM, disk, network) |
 
-The exporter port 9101 is firewalled to `127.0.0.1` only; Prometheus scrapes via localhost. MistServer API port 4242 is firewalled to `127.0.0.1` only.
+The exporter port 9101 is firewalled to `127.0.0.1` only; Prometheus scrapes via localhost. MistServer API port 4242 is firewalled to `127.0.0.1` only. PocketBase, Grafana, and MistServer admin access are intended to stay on localhost and be reached through SSH tunnels, preferably over Tailscale once the VPS is enrolled.
 
 ### 6.2 cast-prom-metrics Metrics
 

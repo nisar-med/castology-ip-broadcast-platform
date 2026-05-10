@@ -15,6 +15,14 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 ssh_run() { ssh -o StrictHostKeyChecking=no root@"${VPS_IP}" "$@"; }
 
+read_env() {
+  local key="$1"
+  if [ ! -f "${SCRIPT_DIR}/.env" ]; then
+    return 0
+  fi
+  grep -E "^${key}=" "${SCRIPT_DIR}/.env" | cut -d= -f2- | tr -d '[:space:]' || true
+}
+
 # ---------------------------------------------------------------------------
 echo "==> [1/6] Installing Docker on VPS"
 # ---------------------------------------------------------------------------
@@ -65,6 +73,17 @@ fi
 scp "${SCRIPT_DIR}/.env" root@"${VPS_IP}":"${DOCKER_DIR}/.env"
 echo "    .env copied"
 
+TAILSCALE_ENABLED="${TAILSCALE_ENABLED:-$(read_env TAILSCALE_ENABLED)}"
+TAILSCALE_ENABLED="${TAILSCALE_ENABLED:-false}"
+TAILSCALE_HOSTNAME="${TAILSCALE_HOSTNAME:-$(read_env TAILSCALE_HOSTNAME)}"
+ALLOW_PUBLIC_SSH="${ALLOW_PUBLIC_SSH:-$(read_env ALLOW_PUBLIC_SSH)}"
+ALLOW_PUBLIC_SSH="${ALLOW_PUBLIC_SSH:-true}"
+
+if [ "${ALLOW_PUBLIC_SSH,,}" != "true" ] && [ "${TAILSCALE_ENABLED,,}" != "true" ]; then
+  echo "ERROR: ALLOW_PUBLIC_SSH=false requires TAILSCALE_ENABLED=true to avoid locking out SSH."
+  exit 1
+fi
+
 # ---------------------------------------------------------------------------
 echo "==> [4/7] Running host setup (kernel tuning, Docker daemon limits)"
 # ---------------------------------------------------------------------------
@@ -80,13 +99,20 @@ if [ -f "${SCRIPT_DIR}/.env" ]; then
 fi
 SRT_INGEST="${SRT_INGEST:-1235}"
 SRT_OUTPUT="${SRT_OUTPUT:-1234}"
-ssh_run bash -s -- "${DOCKER_DIR}/scripts/firewall.sh" "${SRT_INGEST}" "${SRT_OUTPUT}" << 'REMOTE'
+ALLOW_UDP_PORTS="${SRT_INGEST},${SRT_OUTPUT}"
+if [ "${TAILSCALE_ENABLED,,}" = "true" ]; then
+  ALLOW_UDP_PORTS="${ALLOW_UDP_PORTS},41641"
+fi
+ssh_run bash -s -- "${DOCKER_DIR}/scripts/firewall.sh" "${ALLOW_UDP_PORTS}" "${ALLOW_PUBLIC_SSH}" "${TAILSCALE_ENABLED}" << 'REMOTE'
 set -euo pipefail
 SCRIPT="$1"
-SRT_INGEST="$2"
-SRT_OUTPUT="$3"
+ALLOW_UDP_PORTS="$2"
+ALLOW_PUBLIC_SSH="$3"
+TAILSCALE_ENABLED="$4"
 ALLOW_TCP=22 \
-ALLOW_UDP="${SRT_INGEST},${SRT_OUTPUT}" \
+ALLOW_UDP="${ALLOW_UDP_PORTS}" \
+ALLOW_PUBLIC_SSH="${ALLOW_PUBLIC_SSH}" \
+ALLOW_TAILSCALE_SSH="${TAILSCALE_ENABLED}" \
 bash "${SCRIPT}"
 REMOTE
 
@@ -134,5 +160,12 @@ echo "==> Deploy complete"
 echo "    MistServer API : ssh -L 4242:localhost:4242 root@${VPS_IP}"
 echo "    PocketBase     : ssh -L 8090:localhost:8090 root@${VPS_IP}"
 echo "    Grafana        : ssh -L 3000:localhost:3000 root@${VPS_IP}"
+if [ "${TAILSCALE_ENABLED,,}" = "true" ]; then
+  if [ -n "${TAILSCALE_HOSTNAME}" ]; then
+    echo "    Tailnet SSH    : ssh root@${TAILSCALE_HOSTNAME}"
+  else
+    echo "    Tailnet SSH    : ssh root@<tailscale-ip-or-magicdns-name>"
+  fi
+fi
 echo "    HLS play       : https://play.castology.tv/live/{stream}/index.m3u8"
 echo "    SRT ingest     : srt://${VPS_IP}:1235"

@@ -8,18 +8,34 @@ set -euo pipefail
 #   ALLOW_UDP          = "1236,1238"
 #   ALLOW_TCP_FROM     = "4242:1.2.3.4/32,9101:1.2.3.4/32"   (port:cidr pairs)
 #   ALLOW_UDP_FROM     = "1235:1.2.3.4/32"
+#   ALLOW_PUBLIC_SSH   = "true"
+#   ALLOW_TAILSCALE_SSH = "true"
 
 ALLOW_TCP="${ALLOW_TCP:-}"
 ALLOW_UDP="${ALLOW_UDP:-}"
 ALLOW_TCP_FROM="${ALLOW_TCP_FROM:-}"
 ALLOW_UDP_FROM="${ALLOW_UDP_FROM:-}"
+ALLOW_PUBLIC_SSH="${ALLOW_PUBLIC_SSH:-true}"
+ALLOW_TAILSCALE_SSH="${ALLOW_TAILSCALE_SSH:-false}"
+ALLOW_PUBLIC_SSH="$(printf '%s' "${ALLOW_PUBLIC_SSH}" | tr '[:upper:]' '[:lower:]')"
+ALLOW_TAILSCALE_SSH="$(printf '%s' "${ALLOW_TAILSCALE_SSH}" | tr '[:upper:]' '[:lower:]')"
 
 export DEBIAN_FRONTEND=noninteractive
 
 apt-get update -qq
 apt-get install -y -qq ufw
 
-ufw allow 22/tcp comment "SSH"
+if [ "${ALLOW_PUBLIC_SSH}" = "true" ]; then
+  ufw allow 22/tcp comment "SSH"
+else
+  ufw --force delete allow 22/tcp >/dev/null 2>&1 || true
+fi
+
+if [ "${ALLOW_TAILSCALE_SSH}" = "true" ]; then
+  ufw allow in on tailscale0 to any port 22 proto tcp comment "SSH via Tailscale"
+else
+  ufw --force delete allow in on tailscale0 to any port 22 proto tcp >/dev/null 2>&1 || true
+fi
 
 # TCP open to all (port 80 is handled separately via Cloudflare IP allowlist)
 if [ -n "$ALLOW_TCP" ]; then
