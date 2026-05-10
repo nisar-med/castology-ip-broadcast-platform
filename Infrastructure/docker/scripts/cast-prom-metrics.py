@@ -748,8 +748,11 @@ def _check_health():
             feed_key = (b["name"], stream, b["feed_role"])
             old_ip = _last_feed_ip.get(feed_key)
             if old_ip and old_ip != new_ip:
-                broadcaster_feed_status.remove(b["name"], stream, b["feed_role"], old_ip)
-                broadcaster_feed_loss.remove(b["name"], stream, b["feed_role"], old_ip)
+                try:
+                    broadcaster_feed_status.remove(b["name"], stream, b["feed_role"], old_ip)
+                    broadcaster_feed_loss.remove(b["name"], stream, b["feed_role"], old_ip)
+                except Exception:
+                    pass
             _last_feed_ip[feed_key] = new_ip
             broadcaster_feed_status.labels(name=b["name"], stream=stream, feed_role=b["feed_role"], ip=new_ip).set(1 if ip is not None else 0)
             broadcaster_feed_loss.labels(name=b["name"], stream=stream, feed_role=b["feed_role"], ip=new_ip).set(input_loss.get((stream, ip), 0) if ip is not None else 0)

@@ -142,7 +142,7 @@ groups:
               to: 0
             model:
               refId: A
-              expr: mist_affiliate_client_status{job="cast-prom-metrics", monitor="1"}
+              expr: max by (name, stream, client_name, endpoint_role, monitor) (mist_affiliate_client_status{job="cast-prom-metrics", monitor="1"})
               instant: true
               intervalMs: 1000
               maxDataPoints: 43200
