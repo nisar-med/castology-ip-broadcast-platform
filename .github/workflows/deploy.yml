@@ -43,4 +43,4 @@ jobs:
 
       - name: Incremental deploy
         if: ${{ inputs.full_deploy != true }}
-        run: bash Infrastructure/docker/deploy-incremental.sh "${{ secrets.VPS_HOST }}"
+        run: bash Infrastructure/docker/deploy-incremental.sh "${{ secrets.VPS_HOST }}" "${{ github.sha }}"
