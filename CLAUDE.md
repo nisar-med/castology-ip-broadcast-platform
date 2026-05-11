@@ -12,8 +12,9 @@ Or for incremental updates (no full redeploy):
 ```bash
 # Sync files
 rsync -az --delete \
-  --exclude='.git' --exclude='Infrastructure/docker/.env' \
-  --exclude='Infrastructure/terraform/.terraform' --exclude='Infrastructure/terraform/terraform.tfstate*' \
+  --exclude='.git' --exclude='.claude' \
+  --exclude='Infrastructure/docker/.env' \
+  --exclude='Infrastructure/terraform/' \
   --exclude='__pycache__' --exclude='*.pyc' \
   -e "ssh -o StrictHostKeyChecking=no" \
   "Infrastructure/" root@51.254.136.32:/opt/castology/Infrastructure/

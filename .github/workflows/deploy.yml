@@ -1,0 +1,46 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      full_deploy:
+        description: "Run full deploy.sh (installs Docker, rebuilds all services)"
+        type: boolean
+        default: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Connect Tailscale
+        uses: tailscale/github-action@v2
+        with:
+          oauth-client-id: ${{ secrets.TAILSCALE_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TAILSCALE_OAUTH_SECRET }}
+          tags: tag:ci
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Write .env
+        run: |
+          cat > Infrastructure/docker/.env << 'EOF'
+          ${{ secrets.DOCKER_ENV }}
+          EOF
+
+      - name: Full deploy
+        if: ${{ inputs.full_deploy == true }}
+        run: bash Infrastructure/docker/deploy.sh "${{ secrets.VPS_HOST }}"
+
+      - name: Incremental deploy
+        if: ${{ inputs.full_deploy != true }}
+        run: bash Infrastructure/docker/deploy-incremental.sh "${{ secrets.VPS_HOST }}"

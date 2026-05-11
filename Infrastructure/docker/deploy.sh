@@ -53,9 +53,9 @@ echo "==> [2/6] Syncing repo to VPS"
 ssh_run mkdir -p "${REPO_DIR}"
 rsync -az --delete \
   --exclude='.git' \
+  --exclude='.claude' \
   --exclude='Infrastructure/docker/.env' \
-  --exclude='Infrastructure/terraform/.terraform' \
-  --exclude='Infrastructure/terraform/terraform.tfstate*' \
+  --exclude='Infrastructure/terraform/' \
   --exclude='__pycache__' \
   --exclude='*.pyc' \
   -e "ssh -o StrictHostKeyChecking=no" \
