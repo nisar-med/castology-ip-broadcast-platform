@@ -11,7 +11,7 @@ DOCKER_DIR="${REPO_DIR}/Infrastructure/docker"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_URL="$(git -C "${SCRIPT_DIR}" remote get-url origin)"
 
-ssh_run() { ssh -o StrictHostKeyChecking=no root@"${VPS_IP}" "$@"; }
+ssh_run() { ssh -o StrictHostKeyChecking=no ubuntu@"${VPS_IP}" "$@"; }
 
 # ---------------------------------------------------------------------------
 echo "==> [1/3] Updating repo on VPS (ref: ${GIT_REF})"
@@ -39,7 +39,7 @@ if [ ! -f "${SCRIPT_DIR}/.env" ]; then
   echo "ERROR: ${SCRIPT_DIR}/.env not found."
   exit 1
 fi
-scp "${SCRIPT_DIR}/.env" root@"${VPS_IP}":"${DOCKER_DIR}/.env"
+scp "${SCRIPT_DIR}/.env" ubuntu@"${VPS_IP}":"${DOCKER_DIR}/.env"
 echo "    .env copied"
 
 # ---------------------------------------------------------------------------

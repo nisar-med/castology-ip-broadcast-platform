@@ -8,6 +8,19 @@ Make changes locally, then deploy to VPS:
 bash Infrastructure/docker/deploy.sh 51.254.136.32
 ```
 
+## First-time VPS provisioning
+After running `deploy.sh` on a fresh VPS, add the CI deploy public key to the
+`ubuntu` user so incremental deploys (and the GitHub Actions workflow) can
+SSH in as `ubuntu`:
+
+```bash
+ssh-copy-id -i <ci-deploy-key>.pub ubuntu@51.254.136.32
+# or manually append the key to /home/ubuntu/.ssh/authorized_keys
+```
+
+`deploy.sh` already handles `usermod -aG docker ubuntu` and chowning
+`/opt/castology` to ubuntu.
+
 Or for incremental updates (no full redeploy):
 ```bash
 # Sync files

@@ -45,6 +45,10 @@ apt-get update -qq
 apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin git
 systemctl enable docker
 echo "Docker installed: $(docker --version)"
+if id ubuntu &>/dev/null; then
+  usermod -aG docker ubuntu
+  echo "Added ubuntu to docker group"
+fi
 REMOTE
 
 # ---------------------------------------------------------------------------
@@ -61,6 +65,7 @@ rsync -az --delete \
   -e "ssh -o StrictHostKeyChecking=no" \
   "${REPO_ROOT}/" \
   root@"${VPS_IP}":"${REPO_DIR}/"
+ssh_run "id ubuntu &>/dev/null && chown -R ubuntu:ubuntu ${REPO_DIR}" || true
 echo "    Repo synced"
 
 # ---------------------------------------------------------------------------
