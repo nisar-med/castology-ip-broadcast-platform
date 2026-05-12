@@ -14,7 +14,7 @@ REPO_URL="$(git -C "${SCRIPT_DIR}" remote get-url origin)"
 ssh_run() { ssh -o StrictHostKeyChecking=no ubuntu@"${VPS_IP}" "$@"; }
 
 # ---------------------------------------------------------------------------
-echo "==> [1/3] Updating repo on VPS (ref: ${GIT_REF})"
+echo "==> [1/2] Updating repo on VPS (ref: ${GIT_REF})"
 # ---------------------------------------------------------------------------
 ssh_run bash -s -- "${REPO_DIR}" "${REPO_URL}" "${GIT_REF}" << 'REMOTE'
 set -euo pipefail
@@ -33,17 +33,7 @@ echo "    Now at $(git rev-parse --short HEAD) — $(git log -1 --pretty=%s)"
 REMOTE
 
 # ---------------------------------------------------------------------------
-echo "==> [2/3] Copying .env"
-# ---------------------------------------------------------------------------
-if [ ! -f "${SCRIPT_DIR}/.env" ]; then
-  echo "ERROR: ${SCRIPT_DIR}/.env not found."
-  exit 1
-fi
-scp "${SCRIPT_DIR}/.env" ubuntu@"${VPS_IP}":"${DOCKER_DIR}/.env"
-echo "    .env copied"
-
-# ---------------------------------------------------------------------------
-echo "==> [3/3] Rebuilding and restarting services"
+echo "==> [2/2] Rebuilding and restarting services"
 # ---------------------------------------------------------------------------
 ssh_run bash -s -- "${DOCKER_DIR}" << 'REMOTE'
 set -euo pipefail

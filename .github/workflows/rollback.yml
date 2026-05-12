@@ -21,11 +21,5 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
 
-      - name: Write .env
-        run: |
-          cat > Infrastructure/docker/.env << 'EOF'
-          ${{ secrets.DOCKER_ENV }}
-          EOF
-
       - name: Rollback to ${{ inputs.git_ref }}
         run: bash Infrastructure/docker/deploy-incremental.sh "${{ secrets.VPS_HOST }}" "${{ inputs.git_ref }}"
