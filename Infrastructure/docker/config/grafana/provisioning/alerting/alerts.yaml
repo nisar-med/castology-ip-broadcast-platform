@@ -64,7 +64,12 @@ groups:
               to: 0
             model:
               refId: A
-              expr: mist_session_packet_loss_ratio{job="cast-prom-metrics", direction="output"} * 100
+              expr: |
+                (
+                  mist_session_packet_loss_ratio{job="cast-prom-metrics", direction="output"} * 100
+                ) and on(stream, ip) (
+                  mist_affiliate_client_status{job="cast-prom-metrics", monitor="1", ip!="none"} == 1
+                )
               instant: true
               intervalMs: 1000
               maxDataPoints: 43200

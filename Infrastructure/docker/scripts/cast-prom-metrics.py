@@ -218,7 +218,7 @@ _prev_poll: dict[tuple, dict] = {}  # (stream, ip, direction, connector) → {by
 
 # Last written IP labels for health gauges — used to zero out stale series when IP changes
 _last_feed_ip:     dict[tuple[str, str, str], str] = {}  # (name, stream, feed_role) → ip
-_last_client_ip:   dict[tuple[str, str, str, str], str] = {}  # (name, stream, client_name, endpoint_role) → ip
+_last_client_ip:   dict[tuple[str, str, str, str], tuple[str, str]] = {}  # (name, stream, client_name, endpoint_role) → (ip, monitor)
 
 # Highest log entry timestamp seen — prevents double-counting on each poll
 _last_log_ts: int = 0
@@ -444,10 +444,11 @@ def _assign_connected_ips(entities, connected_ips: set[str]):
 
     for index, entity in enumerate(entities):
         allowed = _allowed_ips(entity["allowed_ips"])
-        if allowed:
-            explicit.append((entity, allowed))
-        else:
+        is_wildcard_entry = not allowed or any(e in ("0.0.0.0/0", "::/0") for e in allowed)
+        if is_wildcard_entry:
             wildcard.append(entity)
+        else:
+            explicit.append((entity, allowed))
 
     for entity, allowed in explicit:
         match = None
@@ -596,15 +597,24 @@ def _resolve_session_identity(ip: str, stream: str, direction: str) -> tuple[str
                 return feed["broadcaster_name"], feed["feed_role"]
         return "", ""
 
+    wildcard_match: tuple[str, str] | None = None
     for client in affiliate_clients:
         if client["stream"] != stream:
+            continue
+        if client.get("is_test_client"):
             continue
         allowed = _allowed_ips(client["allowed_ips"])
         if not allowed and client["client_name"]:
             allowed = [client["client_name"]]
-        if _ip_allowed(ip, allowed):
-            return client["affiliate_name"], client["client_name"]
-    return "", ""
+        if not _ip_allowed(ip, allowed):
+            continue
+        is_wildcard_entry = not allowed or any(e in ("0.0.0.0/0", "::/0") for e in allowed)
+        if is_wildcard_entry:
+            if wildcard_match is None:
+                wildcard_match = (client["affiliate_name"], client["client_name"])
+            continue
+        return client["affiliate_name"], client["client_name"]
+    return wildcard_match if wildcard_match else ("", "")
 
 
 def _check_health():
@@ -767,14 +777,21 @@ def _check_health():
         for g, ip in _assign_connected_ips(stream_groups, monitored_outputs):
             new_ip = ip if ip is not None else "none"
             client_key = (g["name"], stream, g["client_name"], g["endpoint_role"])
-            old_ip = _last_client_ip.get(client_key)
             monitor = "1" if g["monitor"] else "0"
-            if old_ip and old_ip != new_ip:
-                affiliate_client_status.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip=old_ip, monitor=monitor).set(0)
-                affiliate_client_loss.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip=old_ip).set(0)
-                affiliate_client_bytes.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip=old_ip).set(0)
-                affiliate_client_uptime.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip=old_ip).set(0)
-            _last_client_ip[client_key] = new_ip
+            prev = _last_client_ip.get(client_key)
+            if prev and prev != (new_ip, monitor):
+                old_ip, old_monitor = prev
+                try:
+                    affiliate_client_status.remove(g["name"], stream, g["client_name"], g["endpoint_role"], old_ip, old_monitor)
+                except KeyError:
+                    pass
+                if old_ip != new_ip:
+                    for metric in (affiliate_client_loss, affiliate_client_bytes, affiliate_client_uptime):
+                        try:
+                            metric.remove(g["name"], stream, g["client_name"], g["endpoint_role"], old_ip)
+                        except KeyError:
+                            pass
+            _last_client_ip[client_key] = (new_ip, monitor)
             affiliate_client_status.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip=new_ip, monitor=monitor).set(1 if ip is not None else 0)
             affiliate_client_loss.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip=new_ip).set(output_loss.get((stream, ip), 0) if ip is not None else 0)
             affiliate_client_bytes.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip=new_ip).set(output_bytes.get((stream, ip), 0) if ip is not None else 0)
