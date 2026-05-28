@@ -1,0 +1,519 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Castology Onboard Portal</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, Arial, sans-serif; }
+    body { margin: 0; background: #0d1117; color: #e6edf3; }
+    main { max-width: 1200px; margin: 0 auto; padding: 20px; }
+    h1,h2,h3 { margin: 10px 0; }
+    section { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px; margin-bottom: 14px; }
+    .grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+    input, select, button, textarea { width: 100%; box-sizing: border-box; padding: 8px; border-radius: 6px; border: 1px solid #30363d; background: #0d1117; color: #e6edf3; }
+    button { cursor: pointer; background: #238636; border-color: #238636; }
+    button.secondary { background: #21262d; border-color: #30363d; }
+    button.danger { background: #da3633; border-color: #da3633; }
+    .row { display: flex; gap: 8px; align-items: end; flex-wrap: wrap; }
+    .row > * { flex: 1; min-width: 180px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+    th, td { border-bottom: 1px solid #30363d; text-align: left; padding: 6px; vertical-align: top; }
+    pre { background: #0d1117; border: 1px solid #30363d; padding: 10px; border-radius: 6px; overflow: auto; }
+    .muted { color: #8b949e; }
+    .ok { color: #3fb950; }
+    .warn { color: #d29922; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Castology Broadcaster & Affiliate Portal</h1>
+  <p class="muted">Uses PocketBase collections: broadcasters, broadcaster_feeds, affiliates, affiliate_clients.</p>
+
+  <section>
+    <h2>1) Admin oversight</h2>
+    <div class="grid">
+      <label>Email <input id="adminEmail" placeholder="admin@castology.tv" /></label>
+      <label>Password <input id="adminPassword" type="password" /></label>
+      <label>&nbsp;<button id="adminLoginBtn">Admin sign in</button></label>
+    </div>
+    <p id="adminStatus" class="muted">Not signed in.</p>
+  </section>
+
+  <section>
+    <h2>2) Broadcaster self-service</h2>
+    <div class="row">
+      <label>Broadcaster name <input id="bName" placeholder="Atlas Media" /></label>
+      <label>Token key <input id="bToken" placeholder="atlas-001" /></label>
+      <label>Allowed IPs <input id="bAllowedIps" placeholder="10.0.0.10,203.0.113.0/24" /></label>
+      <label>&nbsp;<button id="signupBtn" class="secondary">Signup (pending admin approval)</button></label>
+      <label>&nbsp;<button id="loginBtn">Broadcaster login</button></label>
+    </div>
+    <p id="broadcasterStatus" class="muted">No broadcaster session.</p>
+    <div id="broadcasterArea" class="hidden">
+      <h3>Broadcaster feeds</h3>
+      <div class="row">
+        <label>Stream name (geo+news) <input id="feedStream" placeholder="geo+news" /></label>
+        <label>Feed role <input id="feedRole" placeholder="primary" /></label>
+        <label>Allowed IPs <input id="feedAllowedIps" placeholder="198.51.100.42/32" /></label>
+        <label>Active <select id="feedActive"><option value="true">true</option><option value="false">false</option></select></label>
+        <label>&nbsp;<button id="addFeedBtn">Add feed</button></label>
+      </div>
+      <table id="feedsTable">
+        <thead><tr><th>Stream</th><th>Role</th><th>Allowed IPs</th><th>Status</th><th>Ingest URL</th><th>Actions</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <h3>Generated ingest details</h3>
+      <pre id="ingestPreview">Create a feed to view connection details.</pre>
+    </div>
+  </section>
+
+  <section id="distributionArea" class="hidden">
+    <h2>3) Distribution management</h2>
+    <div class="row">
+      <label>Affiliate name <input id="aName" placeholder="Storm Fiber" /></label>
+      <label>Token key <input id="aToken" placeholder="storm-fiber-001" /></label>
+      <label>Email <input id="aEmail" placeholder="ops@storm.example" /></label>
+      <label>Contact <input id="aContact" placeholder="NOC Team" /></label>
+      <label>Active <select id="aActive"><option value="true">true</option><option value="false">false</option></select></label>
+      <label>&nbsp;<button id="addAffiliateBtn">Create affiliate</button></label>
+      <label>&nbsp;<button id="updateAffiliateBtn" class="secondary">Update selected affiliate</button></label>
+    </div>
+    <table id="affiliatesTable">
+      <thead><tr><th>Name</th><th>Token</th><th>Email</th><th>Contact</th><th>Status</th><th>Actions</th></tr></thead>
+      <tbody></tbody>
+    </table>
+
+    <h3>Affiliate clients</h3>
+    <p class="muted">Selected affiliate: <span id="selectedAffiliate">none</span></p>
+    <div class="row">
+      <label>Stream <input id="cStream" placeholder="geo+news" /></label>
+      <label>Client name <input id="cName" placeholder="Karachi POP 1" /></label>
+      <label>Endpoint role <input id="cRole" placeholder="primary" /></label>
+      <label>Allowed IPs <input id="cAllowedIps" placeholder="61.5.131.218,61.5.131.0/24" /></label>
+      <label>Test client <select id="cTest"><option value="false">false</option><option value="true">true</option></select></label>
+      <label>Active <select id="cActive"><option value="true">true</option><option value="false">false</option></select></label>
+      <label>&nbsp;<button id="addClientBtn">Add client</button></label>
+      <label>&nbsp;<button id="updateClientBtn" class="secondary">Update selected client</button></label>
+    </div>
+    <table id="clientsTable">
+      <thead><tr><th>Stream</th><th>Client</th><th>Role</th><th>Allowed IPs</th><th>Test</th><th>Status</th><th>Connections</th><th>Actions</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section id="checksArea" class="hidden">
+    <h2>4) Guardrails and checks</h2>
+    <pre id="checksOutput">Run checks after loading affiliates.</pre>
+    <button id="runChecksBtn" class="secondary">Run onboarding checks</button>
+  </section>
+
+  <section>
+    <h2>Activity log</h2>
+    <pre id="activityLog"></pre>
+    <button id="clearLogBtn" class="danger">Clear local log</button>
+  </section>
+</main>
+
+<script>
+const state = {
+  adminToken: "",
+  broadcaster: null,
+  affiliates: [],
+  clients: [],
+  selectedAffiliate: "",
+  editAffiliateId: "",
+  editClientId: "",
+  log: JSON.parse(localStorage.getItem("castology.portal.log") || "[]"),
+};
+
+const SRT_INGEST_PORT = 1235;
+const SRT_OUTPUT_PORT = 1234;
+const INGEST_HOST = "ingest.castology.tv";
+const PLAY_HOST = "play.castology.tv";
+const STREAM_HOST = "stream.castology.tv";
+
+const el = (id) => document.getElementById(id);
+
+function addLog(action, detail = "") {
+  state.log.unshift(`${new Date().toISOString()} | ${action}${detail ? " | " + detail : ""}`);
+  state.log = state.log.slice(0, 200);
+  localStorage.setItem("castology.portal.log", JSON.stringify(state.log));
+  renderLog();
+}
+
+function renderLog() {
+  el("activityLog").textContent = state.log.length ? state.log.join("\n") : "No activity yet.";
+}
+
+function isValidStreamName(stream) {
+  return /^[a-zA-Z0-9]+(?:\+[a-zA-Z0-9]+)+$/.test(stream);
+}
+
+function isValidIpEntry(value) {
+  if (!value) return false;
+  const ip = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
+  const cidr = /^((25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3})\/([0-9]|[1-2][0-9]|3[0-2])$/;
+  return ip.test(value) || cidr.test(value);
+}
+
+function validateAllowedIps(raw) {
+  const values = raw.split(",").map((v) => v.trim()).filter(Boolean);
+  if (!values.length) return { ok: false, reason: "Provide at least one IP/CIDR value." };
+  const invalid = values.filter((v) => !isValidIpEntry(v));
+  if (invalid.length) return { ok: false, reason: `Invalid values: ${invalid.join(", ")}` };
+  return { ok: true };
+}
+
+async function pbRequest(path, method = "GET", body = null, authToken = null) {
+  const headers = { "Content-Type": "application/json" };
+  if (authToken) headers.Authorization = "Bearer " + authToken;
+  const res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : null });
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`${method} ${path} failed (${res.status}): ${txt}`);
+  }
+  const txt = await res.text();
+  return txt ? JSON.parse(txt) : {};
+}
+
+async function adminLogin() {
+  const identity = el("adminEmail").value.trim();
+  const password = el("adminPassword").value;
+  const data = await pbRequest("/api/collections/_superusers/auth-with-password", "POST", { identity, password });
+  state.adminToken = data.token || "";
+  el("adminStatus").textContent = state.adminToken ? "Admin signed in." : "Admin sign in failed.";
+  el("distributionArea").classList.toggle("hidden", !state.adminToken);
+  el("checksArea").classList.toggle("hidden", !state.adminToken);
+  addLog("admin_login", identity);
+  await loadAffiliates();
+}
+
+async function signupBroadcaster() {
+  if (!state.adminToken) throw new Error("Admin sign in is required for broadcaster signup.");
+  const name = el("bName").value.trim();
+  const token_key = el("bToken").value.trim();
+  const allowed_ips = el("bAllowedIps").value.trim();
+  if (!name || !token_key) throw new Error("Broadcaster name and token are required.");
+  const check = validateAllowedIps(allowed_ips);
+  if (!check.ok) throw new Error(check.reason);
+  await pbRequest("/api/collections/broadcasters/records", "POST", {
+    name, token_key, streams: [], allowed_ips, active: false
+  }, state.adminToken);
+  el("broadcasterStatus").textContent = "Signup created with active=false. Admin approval required.";
+  addLog("broadcaster_signup", name);
+}
+
+async function broadcasterLogin() {
+  const name = el("bName").value.trim();
+  const token = el("bToken").value.trim();
+  if (!name || !token) throw new Error("Broadcaster name and token are required.");
+  const q = encodeURIComponent(`name="${name.replace(/"/g, '\\"')}" && token_key="${token.replace(/"/g, '\\"')}"`);
+  const data = await pbRequest(`/api/collections/broadcasters/records?perPage=1&filter=${q}`);
+  const record = (data.items || [])[0];
+  if (!record) throw new Error("Broadcaster not found.");
+  state.broadcaster = record;
+  el("broadcasterArea").classList.remove("hidden");
+  el("broadcasterStatus").innerHTML = `Logged in as <b>${record.name}</b>. Active=${record.active}`;
+  addLog("broadcaster_login", record.name);
+  await loadFeeds();
+}
+
+function ingestDetails(stream, token = "") {
+  return [
+    `SRT ingest: srt://${INGEST_HOST}:${SRT_INGEST_PORT}?streamid=${stream}`,
+    `SRT affiliate pull: srt://${STREAM_HOST}:${SRT_OUTPUT_PORT}?streamid=${stream}/${token || "<token>"}`,
+    `HLS origin: https://${PLAY_HOST}/hls/${stream}/index.m3u8?token=${token || "<token>"}`,
+    `HLS CDN: https://${PLAY_HOST}/live/${stream}/index.m3u8?token=${token || "<token>"}`
+  ].join("\n");
+}
+
+async function loadFeeds() {
+  if (!state.broadcaster) return;
+  const q = encodeURIComponent(`broadcaster_name="${state.broadcaster.name.replace(/"/g, '\\"')}"`);
+  const data = await pbRequest(`/api/collections/broadcaster_feeds/records?perPage=200&filter=${q}`);
+  const items = data.items || [];
+  const tbody = el("feedsTable").querySelector("tbody");
+  tbody.innerHTML = "";
+  for (const feed of items) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${feed.stream || ""}</td>
+      <td>${feed.feed_role || ""}</td>
+      <td>${feed.allowed_ips || ""}</td>
+      <td>${feed.active ? "active" : "inactive"}</td>
+      <td><code>srt://${INGEST_HOST}:${SRT_INGEST_PORT}?streamid=${feed.stream || ""}</code></td>
+      <td>
+        <button class="secondary" data-action="toggle" data-id="${feed.id}" data-active="${feed.active}">${feed.active ? "Disable" : "Enable"}</button>
+        <button class="danger" data-action="delete" data-id="${feed.id}">Remove</button>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  }
+  if (items[0]) {
+    el("ingestPreview").textContent = ingestDetails(items[0].stream, state.broadcaster.token_key);
+  }
+}
+
+async function addFeed() {
+  if (!state.adminToken) throw new Error("Admin sign in is required to create feeds.");
+  if (!state.broadcaster) throw new Error("Login as broadcaster first.");
+  const stream = el("feedStream").value.trim();
+  const feed_role = el("feedRole").value.trim() || "primary";
+  const allowed_ips = el("feedAllowedIps").value.trim();
+  const active = el("feedActive").value === "true";
+  if (!isValidStreamName(stream)) throw new Error("Stream must use geo+name format.");
+  const check = validateAllowedIps(allowed_ips);
+  if (!check.ok) throw new Error(check.reason);
+  await pbRequest("/api/collections/broadcaster_feeds/records", "POST", {
+    broadcaster_name: state.broadcaster.name, stream, feed_role, allowed_ips, active
+  }, state.adminToken);
+  addLog("feed_create", `${state.broadcaster.name}:${stream}`);
+  el("ingestPreview").textContent = ingestDetails(stream, state.broadcaster.token_key);
+  await loadFeeds();
+}
+
+async function updateOrDeleteFeed(action, id, active) {
+  if (!state.adminToken) throw new Error("Admin sign in is required.");
+  if (action === "toggle") {
+    await pbRequest(`/api/collections/broadcaster_feeds/records/${id}`, "PATCH", { active: active !== "true" }, state.adminToken);
+    addLog("feed_toggle", id);
+  } else {
+    await pbRequest(`/api/collections/broadcaster_feeds/records/${id}`, "DELETE", null, state.adminToken);
+    addLog("feed_delete", id);
+  }
+  await loadFeeds();
+}
+
+async function loadAffiliates() {
+  if (!state.adminToken) return;
+  const data = await pbRequest("/api/collections/affiliates/records?perPage=200", "GET", null, state.adminToken);
+  state.affiliates = data.items || [];
+  const tbody = el("affiliatesTable").querySelector("tbody");
+  tbody.innerHTML = "";
+  for (const item of state.affiliates) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${item.name || ""}</td>
+      <td>${item.token_key || ""}</td>
+      <td>${item.email || ""}</td>
+      <td>${item.contact_name || ""}</td>
+      <td>${item.active ? "active" : "inactive"}</td>
+      <td>
+        <button class="secondary" data-action="select-affiliate" data-name="${item.name}">Select</button>
+        <button class="secondary" data-action="edit-affiliate" data-id="${item.id}">Edit</button>
+        <button class="secondary" data-action="toggle-affiliate" data-id="${item.id}" data-active="${item.active}">${item.active ? "Disable" : "Enable"}</button>
+      </td>`;
+    tbody.appendChild(tr);
+  }
+}
+
+async function createAffiliate() {
+  if (!state.adminToken) throw new Error("Admin sign in is required.");
+  const name = el("aName").value.trim();
+  const token_key = el("aToken").value.trim();
+  const email = el("aEmail").value.trim();
+  const contact_name = el("aContact").value.trim();
+  const active = el("aActive").value === "true";
+  if (!name || !token_key) throw new Error("Affiliate name and token key are required.");
+  await pbRequest("/api/collections/affiliates/records", "POST", { name, token_key, email, contact_name, active }, state.adminToken);
+  addLog("affiliate_create", name);
+  state.editAffiliateId = "";
+  await loadAffiliates();
+}
+
+function editAffiliate(id) {
+  const item = state.affiliates.find((a) => a.id === id);
+  if (!item) return;
+  state.editAffiliateId = id;
+  el("aName").value = item.name || "";
+  el("aToken").value = item.token_key || "";
+  el("aEmail").value = item.email || "";
+  el("aContact").value = item.contact_name || "";
+  el("aActive").value = item.active ? "true" : "false";
+  addLog("affiliate_edit_select", item.name || id);
+}
+
+async function updateAffiliate() {
+  if (!state.adminToken) throw new Error("Admin sign in is required.");
+  if (!state.editAffiliateId) throw new Error("Select an affiliate to edit first.");
+  const name = el("aName").value.trim();
+  const token_key = el("aToken").value.trim();
+  const email = el("aEmail").value.trim();
+  const contact_name = el("aContact").value.trim();
+  const active = el("aActive").value === "true";
+  if (!name || !token_key) throw new Error("Affiliate name and token key are required.");
+  await pbRequest(`/api/collections/affiliates/records/${state.editAffiliateId}`, "PATCH", { name, token_key, email, contact_name, active }, state.adminToken);
+  addLog("affiliate_update", name);
+  await loadAffiliates();
+}
+
+async function toggleAffiliate(id, active) {
+  if (!state.adminToken) throw new Error("Admin sign in is required.");
+  await pbRequest(`/api/collections/affiliates/records/${id}`, "PATCH", { active: active !== "true" }, state.adminToken);
+  addLog("affiliate_toggle", id);
+  await loadAffiliates();
+}
+
+async function selectAffiliate(name) {
+  state.selectedAffiliate = name;
+  el("selectedAffiliate").textContent = name;
+  await loadClients();
+}
+
+async function loadClients() {
+  if (!state.adminToken || !state.selectedAffiliate) return;
+  const q = encodeURIComponent(`affiliate_name="${state.selectedAffiliate.replace(/"/g, '\\"')}"`);
+  const data = await pbRequest(`/api/collections/affiliate_clients/records?perPage=200&filter=${q}`, "GET", null, state.adminToken);
+  state.clients = data.items || [];
+  const tbody = el("clientsTable").querySelector("tbody");
+  tbody.innerHTML = "";
+  for (const c of state.clients) {
+    const details = ingestDetails(c.stream, state.affiliates.find((a) => a.name === c.affiliate_name)?.token_key || "");
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${c.stream || ""}</td>
+      <td>${c.client_name || ""}</td>
+      <td>${c.endpoint_role || ""}</td>
+      <td>${c.allowed_ips || ""}</td>
+      <td>${c.is_test_client ? "true" : "false"}</td>
+      <td>${c.active ? "active" : "inactive"}</td>
+      <td><details><summary>show</summary><pre>${details}</pre></details></td>
+      <td>
+        <button class="secondary" data-action="toggle-client" data-id="${c.id}" data-active="${c.active}">${c.active ? "Disable" : "Enable"}</button>
+        <button class="secondary" data-action="edit-client" data-id="${c.id}">Edit</button>
+        <button class="danger" data-action="delete-client" data-id="${c.id}">Remove</button>
+      </td>`;
+    tbody.appendChild(tr);
+  }
+}
+
+async function createClient() {
+  if (!state.adminToken) throw new Error("Admin sign in is required.");
+  if (!state.selectedAffiliate) throw new Error("Select an affiliate first.");
+  const stream = el("cStream").value.trim();
+  const client_name = el("cName").value.trim();
+  const endpoint_role = el("cRole").value.trim() || "primary";
+  const allowed_ips = el("cAllowedIps").value.trim();
+  const is_test_client = el("cTest").value === "true";
+  const active = el("cActive").value === "true";
+  if (!isValidStreamName(stream)) throw new Error("Stream must use geo+name format.");
+  if (!client_name) throw new Error("Client name is required.");
+  const check = validateAllowedIps(allowed_ips);
+  if (!check.ok) throw new Error(check.reason);
+  await pbRequest("/api/collections/affiliate_clients/records", "POST", {
+    affiliate_name: state.selectedAffiliate, stream, client_name, endpoint_role, allowed_ips, is_test_client, active
+  }, state.adminToken);
+  addLog("affiliate_client_create", `${state.selectedAffiliate}:${stream}:${client_name}`);
+  state.editClientId = "";
+  await loadClients();
+}
+
+function editClient(id) {
+  const item = state.clients.find((c) => c.id === id);
+  if (!item) return;
+  state.editClientId = id;
+  el("cStream").value = item.stream || "";
+  el("cName").value = item.client_name || "";
+  el("cRole").value = item.endpoint_role || "";
+  el("cAllowedIps").value = item.allowed_ips || "";
+  el("cTest").value = item.is_test_client ? "true" : "false";
+  el("cActive").value = item.active ? "true" : "false";
+  addLog("affiliate_client_edit_select", item.client_name || id);
+}
+
+async function updateClient() {
+  if (!state.adminToken) throw new Error("Admin sign in is required.");
+  if (!state.selectedAffiliate) throw new Error("Select an affiliate first.");
+  if (!state.editClientId) throw new Error("Select a client to edit first.");
+  const stream = el("cStream").value.trim();
+  const client_name = el("cName").value.trim();
+  const endpoint_role = el("cRole").value.trim() || "primary";
+  const allowed_ips = el("cAllowedIps").value.trim();
+  const is_test_client = el("cTest").value === "true";
+  const active = el("cActive").value === "true";
+  if (!isValidStreamName(stream)) throw new Error("Stream must use geo+name format.");
+  if (!client_name) throw new Error("Client name is required.");
+  const check = validateAllowedIps(allowed_ips);
+  if (!check.ok) throw new Error(check.reason);
+  await pbRequest(`/api/collections/affiliate_clients/records/${state.editClientId}`, "PATCH", {
+    affiliate_name: state.selectedAffiliate, stream, client_name, endpoint_role, allowed_ips, is_test_client, active
+  }, state.adminToken);
+  addLog("affiliate_client_update", `${state.selectedAffiliate}:${stream}:${client_name}`);
+  await loadClients();
+}
+
+async function toggleOrDeleteClient(action, id, active) {
+  if (!state.adminToken) throw new Error("Admin sign in is required.");
+  if (action === "toggle-client") {
+    await pbRequest(`/api/collections/affiliate_clients/records/${id}`, "PATCH", { active: active !== "true" }, state.adminToken);
+    addLog("affiliate_client_toggle", id);
+  } else {
+    await pbRequest(`/api/collections/affiliate_clients/records/${id}`, "DELETE", null, state.adminToken);
+    addLog("affiliate_client_delete", id);
+  }
+  await loadClients();
+}
+
+function runChecks() {
+  const issues = [];
+  for (const a of state.affiliates) {
+    if (!a.token_key) issues.push(`WARN: affiliate '${a.name}' missing token_key`);
+    const activeClients = state.clients.filter((c) => c.affiliate_name === a.name && c.active);
+    if (a.active && activeClients.length === 0) issues.push(`WARN: active affiliate '${a.name}' has no active affiliate_clients`);
+  }
+  for (const c of state.clients) {
+    if (!validateAllowedIps(c.allowed_ips || "").ok) issues.push(`WARN: client '${c.client_name}' has invalid allowed_ips`);
+    if (!isValidStreamName(c.stream || "")) issues.push(`WARN: client '${c.client_name}' uses non geo+ stream name`);
+  }
+  el("checksOutput").textContent = issues.length ? issues.join("\n") : "OK: no onboarding issues detected in loaded data.";
+  addLog("run_checks", `${issues.length} issue(s)`);
+}
+
+function bindEvents() {
+  el("adminLoginBtn").addEventListener("click", () => run(adminLogin));
+  el("signupBtn").addEventListener("click", () => run(signupBroadcaster));
+  el("loginBtn").addEventListener("click", () => run(broadcasterLogin));
+  el("addFeedBtn").addEventListener("click", () => run(addFeed));
+  el("addAffiliateBtn").addEventListener("click", () => run(createAffiliate));
+  el("updateAffiliateBtn").addEventListener("click", () => run(updateAffiliate));
+  el("addClientBtn").addEventListener("click", () => run(createClient));
+  el("updateClientBtn").addEventListener("click", () => run(updateClient));
+  el("runChecksBtn").addEventListener("click", runChecks);
+  el("clearLogBtn").addEventListener("click", () => { state.log = []; renderLog(); localStorage.removeItem("castology.portal.log"); });
+
+  el("feedsTable").addEventListener("click", (evt) => {
+    const btn = evt.target.closest("button");
+    if (!btn) return;
+    run(() => updateOrDeleteFeed(btn.dataset.action, btn.dataset.id, btn.dataset.active));
+  });
+  el("affiliatesTable").addEventListener("click", (evt) => {
+    const btn = evt.target.closest("button");
+    if (!btn) return;
+    if (btn.dataset.action === "select-affiliate") run(() => selectAffiliate(btn.dataset.name));
+    if (btn.dataset.action === "edit-affiliate") editAffiliate(btn.dataset.id);
+    if (btn.dataset.action === "toggle-affiliate") run(() => toggleAffiliate(btn.dataset.id, btn.dataset.active));
+  });
+  el("clientsTable").addEventListener("click", (evt) => {
+    const btn = evt.target.closest("button");
+    if (!btn) return;
+    if (btn.dataset.action === "edit-client") return editClient(btn.dataset.id);
+    run(() => toggleOrDeleteClient(btn.dataset.action, btn.dataset.id, btn.dataset.active));
+  });
+}
+
+async function run(fn) {
+  try {
+    await fn();
+  } catch (err) {
+    addLog("error", err.message || String(err));
+    alert(err.message || String(err));
+  }
+}
+
+renderLog();
+bindEvents();
+</script>
+</body>
+</html>

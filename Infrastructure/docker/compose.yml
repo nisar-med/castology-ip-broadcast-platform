@@ -205,11 +205,14 @@ services:
     volumes:
       - ./config/nginx/play.castology.tv.conf:/etc/nginx/conf.d/play.conf:ro
       - ./config/nginx/stream.castology.tv.conf:/etc/nginx/conf.d/stream.conf:ro
+      - ./config/nginx/onboard.castology.tv.conf:/etc/nginx/conf.d/onboard.conf:ro
       - ./config/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./config/onboard:/var/www/onboard:ro
     ports:
       - "80:80"
     depends_on:
       - mistserver
+      - pocketbase
     networks:
       - internal
 

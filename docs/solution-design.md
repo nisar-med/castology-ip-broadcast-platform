@@ -474,7 +474,7 @@ Files written to the VPS outside of systemd unit files:
 | `/usr/local/bin/cast-hls-write-{safe}.sh` | `mistserver-r2-push.sh` | Wrapper: resolves sub-playlist URL, strips token, execs ffmpeg |
 | `/usr/local/bin/cast-hls-push-{safe}.py` | `mistserver-r2-push.sh` | boto3 parallel uploader (segments + playlist) |
 | `/usr/local/bin/cast-prom-metrics.py` | `cast-prom-metrics-install.sh` | Prometheus exporter (copied from `/tmp/` uploaded by Terraform) |
-| `/var/www/onboard/index.html` | `pocketbase.sh` | Placeholder page (affiliate portal not yet implemented) |
+| `/var/www/onboard/index.html` | Docker bind mount (`Infrastructure/docker/config/onboard/index.html`) | Onboard portal SPA for broadcaster setup + affiliate client management |
 | `/opt/pocketbase/` | `pocketbase.sh` | PocketBase binary + data directory |
 | `/var/lib/mist-hls/{stream}/` | `mistserver-r2-push.sh` (mkdir) | HLS segment working directory |
 
@@ -725,7 +725,7 @@ This is expected behaviour when no operator is connected — the log noise is be
 | Item | Priority | Notes |
 |---|---|---|
 | Dedicated CPU VPS | High | Resolve 51.4% steal time |
-| Affiliate self-service portal | Medium | Placeholder at onboard.castology.tv; not yet implemented |
+| Onboard portal hardening (RBAC, server-side audit storage) | Medium | Current portal is functional MVP; next step is stronger auth and persistent audit trails |
 | Grafana alerts → email/Slack | Medium | SMTP config pending |
 | Multi-bitrate ladder in MistServer | Low | Requires MistServer transcoding (CPU cost) |
 | Segment cleanup on pipeline restart | Low | Old segments persist on disk until 2h rclone cleanup |
