@@ -620,9 +620,9 @@ def _resolve_session_identity(ip: str, stream: str, direction: str) -> tuple[str
 def _check_health():
     """Cross-reference live sessions against PocketBase config."""
     data = mist_post({"clients": {"time": -CLIENTS_LOOKBACK_SECS}, "active_streams": {}, "log": True})
-    clients_block = data.get("clients", {})
-    fields = clients_block.get("fields", [])
-    rows   = clients_block.get("data", [])
+    clients_block = data.get("clients") or {}
+    fields = clients_block.get("fields") or []
+    rows   = clients_block.get("data") or []
 
     fi = {f: i for i, f in enumerate(fields)} if fields else {}
 
@@ -798,9 +798,9 @@ def _check_health():
             affiliate_client_uptime.labels(name=g["name"], stream=stream, client_name=g["client_name"], endpoint_role=g["endpoint_role"], ip=new_ip).set(output_uptime.get((stream, ip), 0) if ip is not None else 0)
 
     # Parse jitter from active_streams response
-    active_streams_block = data.get("active_streams", {})
-    streams_data = active_streams_block.get("data", {})
-    fields = active_streams_block.get("fields", [])
+    active_streams_block = data.get("active_streams") or {}
+    streams_data = active_streams_block.get("data") or {}
+    fields = active_streams_block.get("fields") or []
     health_idx = fields.index("health") if "health" in fields else None
     if health_idx is not None:
         for stream, row in streams_data.items():
