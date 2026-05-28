@@ -125,6 +125,7 @@ const state = {
   selectedAffiliate: "",
   editAffiliateId: "",
   editClientId: "",
+  lastLoadedAt: "",
   log: JSON.parse(localStorage.getItem("castology.portal.log") || "[]"),
 };
 
@@ -148,7 +149,12 @@ function renderLog() {
 }
 
 function isValidStreamName(stream) {
+  // Castology convention: stream names are split with `+` (example: geo+news).
   return /^[a-zA-Z0-9]+(?:\+[a-zA-Z0-9]+)+$/.test(stream);
+}
+
+function isSafeFilterInput(value) {
+  return /^[a-zA-Z0-9._@+\- ]+$/.test(value);
 }
 
 function isValidIpEntry(value) {
@@ -171,8 +177,7 @@ async function pbRequest(path, method = "GET", body = null, authToken = null) {
   if (authToken) headers.Authorization = "Bearer " + authToken;
   const res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : null });
   if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`${method} ${path} failed (${res.status}): ${txt}`);
+    throw new Error(`Request failed with status ${res.status}.`);
   }
   const txt = await res.text();
   return txt ? JSON.parse(txt) : {};
@@ -191,16 +196,21 @@ async function adminLogin() {
 }
 
 async function signupBroadcaster() {
-  if (!state.adminToken) throw new Error("Admin sign in is required for broadcaster signup.");
   const name = el("bName").value.trim();
   const token_key = el("bToken").value.trim();
   const allowed_ips = el("bAllowedIps").value.trim();
   if (!name || !token_key) throw new Error("Broadcaster name and token are required.");
   const check = validateAllowedIps(allowed_ips);
   if (!check.ok) throw new Error(check.reason);
-  await pbRequest("/api/collections/broadcasters/records", "POST", {
-    name, token_key, streams: [], allowed_ips, active: false
-  }, state.adminToken);
+  const payload = { name, token_key, streams: [], allowed_ips, active: false };
+  try {
+    await pbRequest("/api/collections/broadcasters/records", "POST", payload);
+  } catch (err) {
+    if (!state.adminToken) {
+      throw new Error("Signup requires collection create access. Ask admin to sign in and retry.");
+    }
+    await pbRequest("/api/collections/broadcasters/records", "POST", payload, state.adminToken);
+  }
   el("broadcasterStatus").textContent = "Signup created with active=false. Admin approval required.";
   addLog("broadcaster_signup", name);
 }
@@ -209,6 +219,7 @@ async function broadcasterLogin() {
   const name = el("bName").value.trim();
   const token = el("bToken").value.trim();
   if (!name || !token) throw new Error("Broadcaster name and token are required.");
+  if (!isSafeFilterInput(name) || !isSafeFilterInput(token)) throw new Error("Name/token contains unsupported characters.");
   const q = encodeURIComponent(`name="${name.replace(/"/g, '\\"')}" && token_key="${token.replace(/"/g, '\\"')}"`);
   const data = await pbRequest(`/api/collections/broadcasters/records?perPage=1&filter=${q}`);
   const record = (data.items || [])[0];
@@ -290,6 +301,7 @@ async function loadAffiliates() {
   if (!state.adminToken) return;
   const data = await pbRequest("/api/collections/affiliates/records?perPage=200", "GET", null, state.adminToken);
   state.affiliates = data.items || [];
+  state.lastLoadedAt = new Date().toISOString();
   const tbody = el("affiliatesTable").querySelector("tbody");
   tbody.innerHTML = "";
   for (const item of state.affiliates) {
@@ -367,6 +379,7 @@ async function loadClients() {
   const q = encodeURIComponent(`affiliate_name="${state.selectedAffiliate.replace(/"/g, '\\"')}"`);
   const data = await pbRequest(`/api/collections/affiliate_clients/records?perPage=200&filter=${q}`, "GET", null, state.adminToken);
   state.clients = data.items || [];
+  state.lastLoadedAt = new Date().toISOString();
   const tbody = el("clientsTable").querySelector("tbody");
   tbody.innerHTML = "";
   for (const c of state.clients) {
@@ -456,7 +469,11 @@ async function toggleOrDeleteClient(action, id, active) {
   await loadClients();
 }
 
-function runChecks() {
+async function runChecks() {
+  if (state.adminToken) {
+    await loadAffiliates();
+    if (state.selectedAffiliate) await loadClients();
+  }
   const issues = [];
   for (const a of state.affiliates) {
     if (!a.token_key) issues.push(`WARN: affiliate '${a.name}' missing token_key`);
@@ -467,7 +484,8 @@ function runChecks() {
     if (!validateAllowedIps(c.allowed_ips || "").ok) issues.push(`WARN: client '${c.client_name}' has invalid allowed_ips`);
     if (!isValidStreamName(c.stream || "")) issues.push(`WARN: client '${c.client_name}' uses non geo+ stream name`);
   }
-  el("checksOutput").textContent = issues.length ? issues.join("\n") : "OK: no onboarding issues detected in loaded data.";
+  const summary = issues.length ? issues.join("\n") : "OK: no onboarding issues detected in loaded data.";
+  el("checksOutput").textContent = `${summary}\n\nData loaded at: ${state.lastLoadedAt || "unknown"}`;
   addLog("run_checks", `${issues.length} issue(s)`);
 }
 
@@ -480,7 +498,7 @@ function bindEvents() {
   el("updateAffiliateBtn").addEventListener("click", () => run(updateAffiliate));
   el("addClientBtn").addEventListener("click", () => run(createClient));
   el("updateClientBtn").addEventListener("click", () => run(updateClient));
-  el("runChecksBtn").addEventListener("click", runChecks);
+  el("runChecksBtn").addEventListener("click", () => run(runChecks));
   el("clearLogBtn").addEventListener("click", () => { state.log = []; renderLog(); localStorage.removeItem("castology.portal.log"); });
 
   el("feedsTable").addEventListener("click", (evt) => {
