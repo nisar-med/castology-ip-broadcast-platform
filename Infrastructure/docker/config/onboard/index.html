@@ -39,6 +39,7 @@
       <label>&nbsp;<button id="adminLoginBtn">Admin sign in</button></label>
     </div>
     <p id="adminStatus" class="muted">Not signed in.</p>
+    <p id="tlsWarning" class="warn hidden">Warning: non-HTTPS access detected. Use HTTPS endpoint only.</p>
   </section>
 
   <section>
@@ -126,7 +127,7 @@ const state = {
   editAffiliateId: "",
   editClientId: "",
   lastLoadedAt: "",
-  log: JSON.parse(localStorage.getItem("castology.portal.log") || "[]"),
+  log: JSON.parse(sessionStorage.getItem("castology.portal.log") || "[]"),
 };
 
 const SRT_INGEST_PORT = 1235;
@@ -140,7 +141,7 @@ const el = (id) => document.getElementById(id);
 function addLog(action, detail = "") {
   state.log.unshift(`${new Date().toISOString()} | ${action}${detail ? " | " + detail : ""}`);
   state.log = state.log.slice(0, 200);
-  localStorage.setItem("castology.portal.log", JSON.stringify(state.log));
+  sessionStorage.setItem("castology.portal.log", JSON.stringify(state.log));
   renderLog();
 }
 
@@ -153,8 +154,12 @@ function isValidStreamName(stream) {
   return /^[a-zA-Z0-9]+(?:\+[a-zA-Z0-9]+)+$/.test(stream);
 }
 
-function isSafeFilterInput(value) {
-  return /^[a-zA-Z0-9._@+\- ]+$/.test(value);
+function isSafeNameInput(value) {
+  return /^[a-zA-Z0-9_ -]+$/.test(value);
+}
+
+function isSafeTokenInput(value) {
+  return /^[a-zA-Z0-9_-]+$/.test(value);
 }
 
 function isValidIpEntry(value) {
@@ -177,7 +182,9 @@ async function pbRequest(path, method = "GET", body = null, authToken = null) {
   if (authToken) headers.Authorization = "Bearer " + authToken;
   const res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : null });
   if (!res.ok) {
-    throw new Error(`Request failed with status ${res.status}.`);
+    const err = new Error(`Request failed with status ${res.status}.`);
+    err.status = res.status;
+    throw err;
   }
   const txt = await res.text();
   return txt ? JSON.parse(txt) : {};
@@ -202,15 +209,8 @@ async function signupBroadcaster() {
   if (!name || !token_key) throw new Error("Broadcaster name and token are required.");
   const check = validateAllowedIps(allowed_ips);
   if (!check.ok) throw new Error(check.reason);
-  const payload = { name, token_key, streams: [], allowed_ips, active: false };
-  try {
-    await pbRequest("/api/collections/broadcasters/records", "POST", payload);
-  } catch (err) {
-    if (!state.adminToken) {
-      throw new Error("Signup requires collection create access. Ask admin to sign in and retry.");
-    }
-    await pbRequest("/api/collections/broadcasters/records", "POST", payload, state.adminToken);
-  }
+  const payload = { name, token_key, allowed_ips, active: false };
+  await pbRequest("/api/collections/broadcasters/records", "POST", payload);
   el("broadcasterStatus").textContent = "Signup created with active=false. Admin approval required.";
   addLog("broadcaster_signup", name);
 }
@@ -219,14 +219,15 @@ async function broadcasterLogin() {
   const name = el("bName").value.trim();
   const token = el("bToken").value.trim();
   if (!name || !token) throw new Error("Broadcaster name and token are required.");
-  if (!isSafeFilterInput(name) || !isSafeFilterInput(token)) throw new Error("Name/token contains unsupported characters.");
+  if (!isSafeNameInput(name) || !isSafeTokenInput(token)) throw new Error("Name/token contains unsupported characters.");
   const q = encodeURIComponent(`name="${name.replace(/"/g, '\\"')}" && token_key="${token.replace(/"/g, '\\"')}"`);
   const data = await pbRequest(`/api/collections/broadcasters/records?perPage=1&filter=${q}`);
   const record = (data.items || [])[0];
   if (!record) throw new Error("Broadcaster not found.");
+  if (!isSafeNameInput(record.name || "")) throw new Error("Broadcaster name contains unsupported characters.");
   state.broadcaster = record;
   el("broadcasterArea").classList.remove("hidden");
-  el("broadcasterStatus").innerHTML = `Logged in as <b>${record.name}</b>. Active=${record.active}`;
+  el("broadcasterStatus").textContent = `Logged in as ${record.name}. Active=${record.active}`;
   addLog("broadcaster_login", record.name);
   await loadFeeds();
 }
@@ -235,13 +236,16 @@ function ingestDetails(stream, token = "") {
   return [
     `SRT ingest: srt://${INGEST_HOST}:${SRT_INGEST_PORT}?streamid=${stream}`,
     `SRT affiliate pull: srt://${STREAM_HOST}:${SRT_OUTPUT_PORT}?streamid=${stream}/${token || "<token>"}`,
+    `HLS /hls path uses Mist PLAY_REWRITE (token+IP check):`,
     `HLS origin: https://${PLAY_HOST}/hls/${stream}/index.m3u8?token=${token || "<token>"}`,
+    `HLS /live path uses Worker KV auth (same token query param, different backend check):`,
     `HLS CDN: https://${PLAY_HOST}/live/${stream}/index.m3u8?token=${token || "<token>"}`
   ].join("\n");
 }
 
 async function loadFeeds() {
   if (!state.broadcaster) return;
+  if (!isSafeNameInput(state.broadcaster.name || "")) throw new Error("Broadcaster name contains unsupported characters.");
   const q = encodeURIComponent(`broadcaster_name="${state.broadcaster.name.replace(/"/g, '\\"')}"`);
   const data = await pbRequest(`/api/collections/broadcaster_feeds/records?perPage=200&filter=${q}`);
   const items = data.items || [];
@@ -369,6 +373,7 @@ async function toggleAffiliate(id, active) {
 }
 
 async function selectAffiliate(name) {
+  if (!isSafeNameInput(name || "")) throw new Error("Affiliate name contains unsupported characters.");
   state.selectedAffiliate = name;
   el("selectedAffiliate").textContent = name;
   await loadClients();
@@ -376,14 +381,16 @@ async function selectAffiliate(name) {
 
 async function loadClients() {
   if (!state.adminToken || !state.selectedAffiliate) return;
+  if (!isSafeNameInput(state.selectedAffiliate || "")) throw new Error("Affiliate name contains unsupported characters.");
   const q = encodeURIComponent(`affiliate_name="${state.selectedAffiliate.replace(/"/g, '\\"')}"`);
   const data = await pbRequest(`/api/collections/affiliate_clients/records?perPage=200&filter=${q}`, "GET", null, state.adminToken);
   state.clients = data.items || [];
   state.lastLoadedAt = new Date().toISOString();
   const tbody = el("clientsTable").querySelector("tbody");
   tbody.innerHTML = "";
+  const tokenByAffiliate = new Map(state.affiliates.map((a) => [a.name, a.token_key || ""]));
   for (const c of state.clients) {
-    const details = ingestDetails(c.stream, state.affiliates.find((a) => a.name === c.affiliate_name)?.token_key || "");
+    const details = ingestDetails(c.stream, tokenByAffiliate.get(c.affiliate_name) || "");
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td>${c.stream || ""}</td>
@@ -475,9 +482,14 @@ async function runChecks() {
     if (state.selectedAffiliate) await loadClients();
   }
   const issues = [];
+  const clientsByAffiliate = new Map();
+  for (const client of state.clients) {
+    if (!clientsByAffiliate.has(client.affiliate_name)) clientsByAffiliate.set(client.affiliate_name, []);
+    clientsByAffiliate.get(client.affiliate_name).push(client);
+  }
   for (const a of state.affiliates) {
     if (!a.token_key) issues.push(`WARN: affiliate '${a.name}' missing token_key`);
-    const activeClients = state.clients.filter((c) => c.affiliate_name === a.name && c.active);
+    const activeClients = (clientsByAffiliate.get(a.name) || []).filter((c) => c.active);
     if (a.active && activeClients.length === 0) issues.push(`WARN: active affiliate '${a.name}' has no active affiliate_clients`);
   }
   for (const c of state.clients) {
@@ -499,7 +511,7 @@ function bindEvents() {
   el("addClientBtn").addEventListener("click", () => run(createClient));
   el("updateClientBtn").addEventListener("click", () => run(updateClient));
   el("runChecksBtn").addEventListener("click", () => run(runChecks));
-  el("clearLogBtn").addEventListener("click", () => { state.log = []; renderLog(); localStorage.removeItem("castology.portal.log"); });
+  el("clearLogBtn").addEventListener("click", () => { state.log = []; renderLog(); sessionStorage.removeItem("castology.portal.log"); });
 
   el("feedsTable").addEventListener("click", (evt) => {
     const btn = evt.target.closest("button");
@@ -532,6 +544,9 @@ async function run(fn) {
 
 renderLog();
 bindEvents();
+if (location.protocol !== "https:") {
+  el("tlsWarning").classList.remove("hidden");
+}
 </script>
 </body>
 </html>
