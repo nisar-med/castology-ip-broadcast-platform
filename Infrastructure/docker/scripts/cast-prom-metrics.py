@@ -718,7 +718,13 @@ def _check_health():
         stream_names = list(_pb_config["stream_names"])
 
     for name in stream_names:
-        stream_up.labels(stream=name).set(1 if name in active_inputs else 0)
+        is_up = name in active_inputs
+        stream_up.labels(stream=name).set(1 if is_up else 0)
+        # Jitter is only reported for active streams; when a stream goes offline
+        # MistServer stops sending it, leaving the gauge frozen at its last value
+        # and falsely keeping the High Ingest Jitter alert firing. Zero it here.
+        if not is_up:
+            stream_jitter_ms.labels(stream=name).set(0)
         for d in ("input", "output", "unknown"):
             for c in ("TSSRT", "HLS", "HTTP", "unknown"):
                 operator_sessions.labels(stream=name, direction=d, connector=c).set(
