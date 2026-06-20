@@ -2,16 +2,32 @@
 ssh root@51.254.136.32
 
 # Deployment
-Make changes locally, then deploy to VPS:
+**All deploys go through the GitHub Actions workflow (`.github/workflows/deploy.yml`),
+not manual rsync/ssh.** This keeps `main`, the VPS git checkout at `/opt/castology`,
+and CI in lockstep. Manual rsync leaves the server out of sync with git, and the
+workflow's `git reset --hard origin/main` will later clobber any rsync-only state.
+
+Standard flow:
+1. Commit changes and push.
+2. Open a PR into `main`. Merging to `main` triggers `deploy.yml` (incremental:
+   `deploy-incremental.sh`, which SSHes in as `ubuntu`, `git reset --hard origin/main`,
+   then `docker compose up -d --build`).
+3. For a full rebuild (install Docker, write `.env` from `secrets.DOCKER_ENV`, run
+   `deploy.sh`), trigger `deploy.yml` via `workflow_dispatch` with `full_deploy: true`.
+
+The VPS is a git checkout at `/opt/castology` owned by `ubuntu`. Secrets live only
+in the VPS `.env` and are re-injected into config at container start (e.g. the
+`mistserver.conf` `RUNTIME_INJECTED` placeholder) — never commit injected values.
+
+## Break-glass / first-time provisioning only
+Manual `deploy.sh` is for bootstrapping a fresh VPS, not routine deploys:
 
 ```bash
 bash Infrastructure/docker/deploy.sh 51.254.136.32
 ```
 
-## First-time VPS provisioning
-After running `deploy.sh` on a fresh VPS, add the CI deploy public key to the
-`ubuntu` user so incremental deploys (and the GitHub Actions workflow) can
-SSH in as `ubuntu`:
+After `deploy.sh` on a fresh VPS, add the CI deploy public key to the `ubuntu`
+user so the workflow can SSH in as `ubuntu`:
 
 ```bash
 ssh-copy-id -i <ci-deploy-key>.pub ubuntu@51.254.136.32
@@ -19,22 +35,9 @@ ssh-copy-id -i <ci-deploy-key>.pub ubuntu@51.254.136.32
 ```
 
 `deploy.sh` already handles `usermod -aG docker ubuntu` and chowning
-`/opt/castology` to ubuntu.
-
-Or for incremental updates (no full redeploy):
-```bash
-# Sync files
-rsync -az --delete \
-  --exclude='.git' --exclude='.claude' \
-  --exclude='Infrastructure/docker/.env' \
-  --exclude='Infrastructure/terraform/' \
-  --exclude='__pycache__' --exclude='*.pyc' \
-  -e "ssh -o StrictHostKeyChecking=no" \
-  "Infrastructure/" root@51.254.136.32:/opt/castology/Infrastructure/
-
-# Rebuild and restart a specific service
-ssh root@51.254.136.32 "cd /opt/castology/Infrastructure/docker && docker compose build <service> && docker compose up -d <service>"
-```
+`/opt/castology` to ubuntu. Also ensure `/opt/castology` is a git checkout
+(`git init` + `git remote add origin <repo>` + `git fetch` + checkout `main`),
+since `deploy-incremental.sh` does `git reset --hard origin/main` there.
 
 # Infrastructure
 - Terraform manages Cloudflare only: DNS, R2, Worker
