@@ -250,12 +250,32 @@
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "fillOpacity": 10,
-            "lineWidth": 2
+            "fillOpacity": 25,
+            "lineWidth": 2,
+            "lineInterpolation": "stepAfter",
+            "spanNulls": false
           },
           "color": {
             "mode": "palette-classic"
-          }
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "Offline",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "Online",
+                  "color": "green"
+                }
+              }
+            }
+          ],
+          "max": 1,
+          "min": 0,
+          "unit": "short"
         },
         "overrides": []
       },
@@ -268,8 +288,14 @@
       "id": 21,
       "options": {
         "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
         }
       },
       "targets": [
@@ -278,12 +304,13 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "increase(mist_auth_events_total{job=\"cast-prom-metrics\", stream=~\"$stream\"}[$__rate_interval])",
-          "legendFormat": "{{affiliate}} [{{result}}]",
+          "expr": "mist_broadcaster_feed_status{job=\"cast-prom-metrics\", stream=~\"$stream\"}",
+          "legendFormat": "{{stream}} — {{name}} ({{feed_role}})",
           "refId": "A"
         }
       ],
-      "title": "Ingest Auth Events (ALLOW / DENY)",
+      "description": "1 = feed online, 0 = offline. The 'Mean' column in the legend is the uptime fraction over the selected window.",
+      "title": "Broadcaster Feed Uptime (1=online / 0=offline)",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
