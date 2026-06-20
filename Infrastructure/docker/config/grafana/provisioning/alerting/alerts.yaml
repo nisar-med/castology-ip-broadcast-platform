@@ -186,7 +186,7 @@ groups:
               to: 0
             model:
               refId: A
-              expr: mist_stream_jitter_ms{job="cast-prom-metrics"}
+              expr: mist_stream_jitter_ms{job="cast-prom-metrics"} and on(stream) (mist_stream_up == 1)
               instant: true
               intervalMs: 1000
               maxDataPoints: 43200
